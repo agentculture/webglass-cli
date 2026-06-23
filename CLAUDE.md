@@ -119,14 +119,11 @@ constraints it imposes when you extend the CLI:
   codes, `--json`, and `explain`.
 - **Descriptive verbs** (`overview`) must never hard-fail on a stray/bad target
   path — `overview` accepts an ignored positional `target` for exactly this.
-- **`explain <self>`** must resolve (see the gotcha — this check is currently
-  failing and needs fixing).
-
-> ⚠️ **The rubric gate is currently RED.** `explain_self` probes
-> `explain webglass` (the import-package name), but the catalog's root key is
-> `("webglass-cli",)` only. Fix: add `("webglass",): _ROOT` to `ENTRIES` in
-> `webglass/explain/catalog.py`. Until then `teken cli doctor . --strict` exits
-> 1 and the lint job fails.
+- **`explain <self>` must resolve** — for both the dist name (`webglass-cli`)
+  *and* the **import-package** name (`webglass`), because the rubric's
+  `explain_self` check probes the import name. The catalog (`ENTRIES` in
+  `webglass/explain/catalog.py`) carries both as root keys; if you ever rename
+  the package, keep both aliases in sync or this check goes red.
 
 ## Identity and mesh membership
 
@@ -225,6 +222,6 @@ a generic scraper/crawler.
   examples are wrong (that binary does not exist). Naming map: dist/PyPI name
   `webglass-cli`, import package `webglass`, console script `webglass`, argparse
   `prog` (shown in help/errors) `webglass-cli`. Several of these should converge
-  as the product matures.
-- **The rubric gate is currently failing** on `explain_self` — see the fix in
-  the rubric section above.
+  as the product matures. This divergence is also why the explain catalog keys
+  the root entry under *both* `webglass-cli` and `webglass` (see the rubric
+  section).

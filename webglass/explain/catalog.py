@@ -1,7 +1,9 @@
 """Markdown catalog for ``webglass-cli explain <path>``.
 
-Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple
-and ``("webglass-cli",)`` both resolve to the root entry.
+Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple,
+``("webglass-cli",)`` (the dist name), and ``("webglass",)`` (the import-package
+name the agent-first rubric's ``explain_self`` check probes) all resolve to the
+root entry.
 
 Keep bodies self-contained: an agent reading one entry should get enough
 context without chaining reads.
