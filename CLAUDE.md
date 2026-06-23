@@ -149,6 +149,28 @@ as adding Playwright.
 
 ## Conventions and workflow
 
+**Memory discipline — recall before, remember after.** This repo shares an
+eidetic memory store with its mesh peers (the `claude` and `colleague`
+backends both resolve the same `webglass-cli` scope, so they read each
+other's notes). Make it a per-task habit:
+
+- **`/recall` before you start.** Search the store for the area you're about
+  to touch — prior decisions, gotchas, "have we done this before?" — so you
+  build on what's already known instead of re-deriving it. Do this before
+  non-trivial tasks, not just when asked.
+- **`/remember` when something worth keeping surfaces.** A non-obvious
+  decision and its rationale, a constraint, a fix and *why* it was needed, a
+  gotcha that cost time, a fact the next session would otherwise re-learn.
+  Capture it as it happens, not at the end when it's faded.
+
+Default scope is this agent's *private* memory plus the shared *public* pool;
+pass `--visibility public` to `/remember` when the fact should reach mesh
+peers, not just future-you. Don't store what the repo already records (code
+structure, git history, what's already in this file or `CHANGELOG.md`) —
+store what you'd have to re-derive. These are the `recall`/`remember` skills
+(`.claude/skills/`), backed by the `eidetic` store, and are distinct from the
+WebGlass product's own Web-memory module (issue #2, below).
+
 **Version-bump-every-PR (hard CI gate).** The `version-check` job fails any PR
 whose `pyproject.toml` version equals `main`'s — *every* PR bumps the version,
 even docs/config/CI-only ones. Use the `version-bump` skill (`major|minor|patch`)
