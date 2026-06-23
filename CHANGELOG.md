@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-06-23
+
+### Added
+
+- CLAUDE.md: "Memory discipline — recall before, remember after" convention — /recall related work before non-trivial tasks and /remember non-obvious decisions, constraints, and time-costing gotchas as they surface, with scope/visibility guidance.
+
 ## [0.4.1] - 2026-06-23
 
 ### Changed
