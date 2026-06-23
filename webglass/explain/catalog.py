@@ -119,6 +119,7 @@ itself (distinct from the global `overview`, which describes the agent).
 ENTRIES: dict[tuple[str, ...], str] = {
     (): _ROOT,
     ("webglass-cli",): _ROOT,
+    ("webglass",): _ROOT,
     ("whoami",): _WHOAMI,
     ("learn",): _LEARN,
     ("explain",): _EXPLAIN,

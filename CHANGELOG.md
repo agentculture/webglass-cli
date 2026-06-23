@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-23
+
+### Changed
+
+- Re-initialized `CLAUDE.md` from the bootstrap seed into a full runtime prompt (via `/init`, incorporating the WebGlass design spec in issue #2): documents the two-layer state (template CLI skeleton vs. the not-yet-built WebGlass product), the CLI registration/error/output/explain contracts, the agent-first rubric gate constraints, mesh identity, the version-bump/cicd conventions, and the target architecture.
+
+### Fixed
+
+- explain catalog now resolves the import-package name `webglass` (not just the dist name `webglass-cli`), which the agent-first rubric's `explain_self` check probes. The `teken cli doctor . --strict` gate was exiting 1 (CI lint job red); it now passes. Added a regression test.
+
 ## [0.4.0] - 2026-06-23
 
 ### Added
