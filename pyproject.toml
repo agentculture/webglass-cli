@@ -1,6 +1,6 @@
 [project]
 name = "webglass-cli"
-version = "0.4.0"
+version = "0.4.1"
 description = "Agent-first web browsing CLI — wraps Playwright and headless Chromium so an agent can navigate, read, and interact with web pages more effectively."
 readme = "README.md"
 license = "Apache-2.0"

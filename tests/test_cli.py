@@ -92,6 +92,14 @@ def test_explain_self(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().out.startswith("#")
 
 
+def test_explain_import_package_name(capsys: pytest.CaptureFixture[str]) -> None:
+    # The agent-first rubric's `explain_self` probes the import-package name
+    # (`webglass`), not the dist name (`webglass-cli`). Both must resolve.
+    rc = main(["explain", "webglass"])
+    assert rc == 0
+    assert capsys.readouterr().out.startswith("#")
+
+
 def test_explain_json(capsys: pytest.CaptureFixture[str]) -> None:
     rc = main(["explain", "whoami", "--json"])
     assert rc == 0
