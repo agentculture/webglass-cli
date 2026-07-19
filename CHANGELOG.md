@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-19
+
+### Changed
+
+- **Repositioned every self-description surface onto the WebGlass product brief in [issue #1](https://github.com/agentculture/webglass-cli/issues/1)**, which replaced the original scaffold brief and superseded the closed #2. `README.md`, the `explain` root catalog entry, the `learn` prompt (text + JSON `purpose`), and the argparse `prog` description all described the repo as "a clonable template for AgentCulture mesh agents"; they now describe WebGlass as the guarded web operations and evidence plane for AI agents, and each states plainly that the web operation surface is specified but not yet built.
+- README: replaced the template-era `Make it your own` clone-and-rename checklist (obsolete — this repo is WebGlass, not a template, and it pointed at a `git grep` procedure no longer in CLAUDE.md) with a `Design principles` section covering the web-operation core abstraction, the four separated state kinds, the three effect classes, progressive-disclosure lenses, honest extraction, adversarial-input trust zones, and the replaceable Playwright adapter.
+- CLAUDE.md: re-initialized against issue #1 — documents the `WebOperation`/`WebOperationResult` contract, the session/exploration/evidence/memory separation and `WebContext`, effect classes with prepare -> commit -> verify, the semantic noun boundaries, `PageSnapshot` and stable element references, trust zones and SSRF/redirect policy, the M0-M6 delivery sequence, and the invariants and non-goals.
+
+### Fixed
+
+- README quickstart invoked `uv run webglass-cli ...`, a binary that does not exist — `[project.scripts]` binds the console script as `webglass`. All examples corrected.
+
 ## [0.4.2] - 2026-06-23
 
 ### Added

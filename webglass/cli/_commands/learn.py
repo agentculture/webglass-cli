@@ -2,6 +2,11 @@
 
 Prints a structured self-teaching prompt. Must satisfy the agent-first rubric:
 >=200 chars and mention purpose, command map, exit codes, --json, and explain.
+
+The purpose text describes WebGlass (the product this repo is building, see
+issue #1) and flags that the web operation surface is not implemented yet, so an
+agent reading ``learn`` is not misled into calling verbs that do not exist. Keep
+it in sync with the ``explain`` root entry in :mod:`webglass.explain.catalog`.
 """
 
 from __future__ import annotations
@@ -12,14 +17,23 @@ from webglass import __version__
 from webglass.cli._output import emit_result
 
 _TEXT = """\
-webglass-cli — a clonable template for AgentCulture mesh agents.
+webglass-cli — WebGlass, the guarded web operations and evidence plane for AI agents.
 
 Purpose
 -------
-Scaffold for a new Culture mesh agent: an agent-first CLI (cited from the teken
-`python-cli` reference), an identity (culture.yaml + CLAUDE.md), the canonical
-guildmaster skill kit under .claude/skills/, and a deploy/CI baseline. Clone it,
-rename the package, and edit culture.yaml to mint a new agent.
+Turn agent intent into normalized web operations: apply web-specific policy,
+drive search/fetch/browser backends, return token-efficient page state, record
+navigational provenance, and produce durable, inspectable evidence. WebGlass
+records what it observed; the calling agent draws the conclusions. It is not a
+thin Playwright wrapper, not a generic scraper, and not a fact checker.
+
+Status
+------
+Pre-implementation. The web operation surface (search, page, action, session,
+exploration, evidence, memory, policy, operation) is specified but not built —
+see https://github.com/agentculture/webglass-cli/issues/1. What ships today is
+the agent-first introspection CLI below, plus the contracts every future verb
+registers onto.
 
 Commands
 --------
@@ -52,7 +66,7 @@ def _as_json_payload() -> dict[str, object]:
     return {
         "tool": "webglass-cli",
         "version": __version__,
-        "purpose": "Clonable scaffold for a new AgentCulture mesh agent.",
+        "purpose": "The guarded web operations and evidence plane for AI agents.",
         "commands": [
             {"path": ["whoami"], "summary": "Identity probe from culture.yaml."},
             {"path": ["learn"], "summary": "Self-teaching prompt."},

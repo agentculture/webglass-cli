@@ -14,11 +14,23 @@ from __future__ import annotations
 _ROOT = """\
 # webglass-cli
 
-A clonable template for AgentCulture mesh agents. It carries an agent-first CLI
-(cited from the teken `python-cli` reference), a mesh identity (`culture.yaml` +
-`CLAUDE.md`), the canonical guildmaster skill kit under `.claude/skills/`, and a
-buildable/deployable package baseline. Clone it, rename the package, edit
-`culture.yaml`, and you have a new agent.
+WebGlass — the guarded web operations and evidence plane for AI agents.
+
+It turns agent intent into normalized web operations, applies web-specific
+policy, drives search/fetch/browser backends, returns token-efficient page
+state, records navigational provenance, and produces durable, inspectable
+evidence. It is not a thin Playwright wrapper, not a generic scraper, and not a
+second agent that decides what to believe: WebGlass records what it observed,
+and the calling agent draws the conclusions.
+
+## Status
+
+**Pre-implementation.** The web operation surface (`search`, `page`, `action`,
+`session`, `exploration`, `evidence`, `memory`, `policy`, `operation`) is
+specified but not built — see the build brief at
+<https://github.com/agentculture/webglass-cli/issues/1>. What ships today is the
+agent-first introspection CLI below, plus the contracts every future verb
+registers onto. The runtime has no third-party dependencies yet.
 
 ## Verbs
 
@@ -28,6 +40,12 @@ buildable/deployable package baseline. Clone it, rename the package, edit
 - `webglass-cli overview` — descriptive snapshot of the agent.
 - `webglass-cli doctor` — check the agent-identity invariants.
 - `webglass-cli cli overview` — describe the CLI surface.
+
+## Contracts
+
+Every command supports `--json`. Results go to stdout; errors and diagnostics go
+to stderr — never mixed. Failures carry `{code, message, remediation}`; no Python
+traceback ever reaches stderr.
 
 ## Exit-code policy
 

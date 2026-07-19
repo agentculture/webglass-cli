@@ -71,7 +71,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser = _CliArgumentParser(
         prog="webglass-cli",
-        description="webglass-cli — a clonable template for AgentCulture mesh agents.",
+        description=(
+            "webglass-cli — WebGlass, the guarded web operations and evidence "
+            "plane for AI agents."
+        ),
     )
     parser.add_argument(
         "--version",
