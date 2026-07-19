@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-19
+
+### Changed
+
+- **Repositioned every self-description surface onto the WebGlass product brief in [issue #1](https://github.com/agentculture/webglass-cli/issues/1)**, which replaced the original scaffold brief and superseded the closed #2. `README.md`, the `explain` root catalog entry, the `learn` prompt (text + JSON `purpose`), and the argparse `prog` description all described the repo as "a clonable template for AgentCulture mesh agents"; they now describe WebGlass as the guarded web operations and evidence plane for AI agents, and each states plainly that the web operation surface is specified but not yet built.
+- README: replaced the template-era `Make it your own` clone-and-rename checklist (obsolete — this repo is WebGlass, not a template, and it pointed at a `git grep` procedure no longer in CLAUDE.md) with a `Design principles` section covering the web-operation core abstraction, the four separated state kinds, the three effect classes, progressive-disclosure lenses, honest extraction, adversarial-input trust zones, and the replaceable Playwright adapter.
+- CLAUDE.md: re-initialized against issue #1 — documents the `WebOperation`/`WebOperationResult` contract, the session/exploration/evidence/memory separation and `WebContext`, effect classes with prepare -> commit -> verify, the semantic noun boundaries, `PageSnapshot` and stable element references, trust zones and SSRF/redirect policy, the M0-M6 delivery sequence, and the invariants and non-goals.
+
+### Added
+
+- `learn --json` gained machine-readable `status` (`"pre-implementation"`), `status_detail`, and `console_script` fields, and its `purpose` now carries the pre-implementation clause. A JSON consumer reading only `purpose` could previously infer web-operation capabilities the text surfaces explicitly say are not built (PR #7 review).
+
+### Fixed
+
+- **The CLI printed a non-existent binary in every runnable example.** `[project.scripts]` binds the console script as `webglass`; `webglass-cli` is the distribution name only. The `learn` command map, all nine `explain` catalog entries' Usage blocks and headings, the `explain_pointer`, the `cli overview` subject, and the `doctor` status header all printed `webglass-cli <verb>`, sending any agent that copied them to "command not found". Corrected everywhere; runtime output now contains zero references to the non-existent binary. The `learn` prompt and the `explain` root entry also gained an explicit Invocation note documenting the console-script / dist-name / import-package split (PR #7 review).
+- README quickstart invoked `uv run webglass-cli ...` for the same reason. All examples corrected.
+- Three regression tests lock the above: `test_learn_examples_use_the_real_console_script`, `test_catalog_examples_use_the_real_console_script` (guards every catalog entry, since the bug was present in all of them), and `test_learn_json_declares_pre_implementation_status`. One pre-existing test asserted the *wrong* binary name and was pinning the bug in place; it now asserts the correct one.
+
 ## [0.4.2] - 2026-06-23
 
 ### Added
