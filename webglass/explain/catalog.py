@@ -1,4 +1,4 @@
-"""Markdown catalog for ``webglass-cli explain <path>``.
+"""Markdown catalog for ``webglass explain <path>``.
 
 Each entry is verbatim markdown. Keys are command-path tuples. The empty tuple,
 ``("webglass-cli",)`` (the dist name), and ``("webglass",)`` (the import-package
@@ -32,14 +32,19 @@ specified but not built — see the build brief at
 agent-first introspection CLI below, plus the contracts every future verb
 registers onto. The runtime has no third-party dependencies yet.
 
+## Invocation
+
+The console script is `webglass`. `webglass-cli` is the distribution/PyPI name
+and is **not** an invocable binary; `webglass` is the import package too.
+
 ## Verbs
 
-- `webglass-cli whoami` — identity probe from `culture.yaml`.
-- `webglass-cli learn` — structured self-teaching prompt.
-- `webglass-cli explain <path>` — markdown docs for any noun/verb.
-- `webglass-cli overview` — descriptive snapshot of the agent.
-- `webglass-cli doctor` — check the agent-identity invariants.
-- `webglass-cli cli overview` — describe the CLI surface.
+- `webglass whoami` — identity probe from `culture.yaml`.
+- `webglass learn` — structured self-teaching prompt.
+- `webglass explain <path>` — markdown docs for any noun/verb.
+- `webglass overview` — descriptive snapshot of the agent.
+- `webglass doctor` — check the agent-identity invariants.
+- `webglass cli overview` — describe the CLI surface.
 
 ## Contracts
 
@@ -56,62 +61,62 @@ traceback ever reaches stderr.
 
 ## See also
 
-- `webglass-cli explain whoami`
-- `webglass-cli explain doctor`
+- `webglass explain whoami`
+- `webglass explain doctor`
 """
 
 _WHOAMI = """\
-# webglass-cli whoami
+# webglass whoami
 
 Reports the agent's identity from `culture.yaml`: nick (`suffix`), backend,
 served model, and the package version. Read-only.
 
 ## Usage
 
-    webglass-cli whoami
-    webglass-cli whoami --json
+    webglass whoami
+    webglass whoami --json
 """
 
 _LEARN = """\
-# webglass-cli learn
+# webglass learn
 
 Prints a structured self-teaching prompt covering purpose, command map,
 exit-code policy, `--json` support, and the `explain` pointer.
 
 ## Usage
 
-    webglass-cli learn
-    webglass-cli learn --json
+    webglass learn
+    webglass learn --json
 """
 
 _EXPLAIN = """\
-# webglass-cli explain <path>
+# webglass explain <path>
 
 Prints markdown documentation for any noun/verb path. Unlike `--help` (terse,
 positional), `explain` is global and addressable by path.
 
 ## Usage
 
-    webglass-cli explain webglass-cli
-    webglass-cli explain whoami
-    webglass-cli explain --json <path>
+    webglass explain webglass
+    webglass explain whoami
+    webglass explain --json <path>
 """
 
 _OVERVIEW = """\
-# webglass-cli overview
+# webglass overview
 
 Read-only descriptive snapshot of the agent: identity (from `culture.yaml`), the
-verb surface, and the sibling-pattern artifacts the template carries. Accepts an
+verb surface, and the sibling-pattern artifacts this repo carries. Accepts an
 ignored `target` so a stray path never hard-fails.
 
 ## Usage
 
-    webglass-cli overview
-    webglass-cli overview --json
+    webglass overview
+    webglass overview --json
 """
 
 _DOCTOR = """\
-# webglass-cli doctor
+# webglass doctor
 
 Checks the agent-identity invariants `steward doctor` verifies:
 prompt-file-present and backend-consistency (`colleague` → `AGENTS.colleague.md`), plus a
@@ -119,20 +124,20 @@ skills-present check. Exits 1 when unhealthy.
 
 ## Usage
 
-    webglass-cli doctor
-    webglass-cli doctor --json
+    webglass doctor
+    webglass doctor --json
 """
 
 _CLI = """\
-# webglass-cli cli
+# webglass cli
 
 Noun group for CLI-surface introspection. `cli overview` describes the CLI
 itself (distinct from the global `overview`, which describes the agent).
 
 ## Usage
 
-    webglass-cli cli overview
-    webglass-cli cli overview --json
+    webglass cli overview
+    webglass cli overview --json
 """
 
 

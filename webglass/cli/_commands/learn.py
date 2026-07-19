@@ -1,12 +1,21 @@
-"""``webglass-cli learn`` — the learnability affordance.
+"""``webglass learn`` — the learnability affordance.
 
 Prints a structured self-teaching prompt. Must satisfy the agent-first rubric:
 >=200 chars and mention purpose, command map, exit codes, --json, and explain.
 
-The purpose text describes WebGlass (the product this repo is building, see
-issue #1) and flags that the web operation surface is not implemented yet, so an
-agent reading ``learn`` is not misled into calling verbs that do not exist. Keep
-it in sync with the ``explain`` root entry in :mod:`webglass.explain.catalog`.
+Two things this prompt must keep right, because agents act on it directly:
+
+* **The executable name.** Command examples use ``webglass`` — the console
+  script ``[project.scripts]`` actually binds. ``webglass-cli`` is the
+  distribution name and is *not* an invocable binary; printing it in a command
+  map sends an agent straight to "command not found".
+* **The pre-implementation status.** Both the text body and the JSON payload
+  (``status`` / ``status_detail``, and a parenthetical in ``purpose``) flag that
+  the web operation surface is specified but not built, so a JSON consumer that
+  reads only ``purpose`` cannot infer capabilities that do not exist.
+
+Keep both in sync with the ``explain`` root entry in
+:mod:`webglass.explain.catalog`.
 """
 
 from __future__ import annotations
@@ -17,7 +26,12 @@ from webglass import __version__
 from webglass.cli._output import emit_result
 
 _TEXT = """\
-webglass-cli — WebGlass, the guarded web operations and evidence plane for AI agents.
+webglass — WebGlass, the guarded web operations and evidence plane for AI agents.
+
+Invocation
+----------
+The console script is `webglass`. The distribution/PyPI name is `webglass-cli`
+and the import package is `webglass`; run the commands below as `webglass ...`.
 
 Purpose
 -------
@@ -37,12 +51,12 @@ registers onto.
 
 Commands
 --------
-  webglass-cli whoami             Identity from culture.yaml.
-  webglass-cli learn              This self-teaching prompt.
-  webglass-cli explain <path>...  Markdown docs for any noun/verb path.
-  webglass-cli overview           Descriptive snapshot of the agent.
-  webglass-cli doctor             Check the agent-identity invariants.
-  webglass-cli cli overview       Describe the CLI surface itself.
+  webglass whoami             Identity from culture.yaml.
+  webglass learn              This self-teaching prompt.
+  webglass explain <path>...  Markdown docs for any noun/verb path.
+  webglass overview           Descriptive snapshot of the agent.
+  webglass doctor             Check the agent-identity invariants.
+  webglass cli overview       Describe the CLI surface itself.
 
 Machine-readable output
 -----------------------
@@ -58,15 +72,26 @@ Exit-code policy
 
 More detail
 -----------
-  webglass-cli explain webglass-cli
+  webglass explain webglass
 """
 
 
 def _as_json_payload() -> dict[str, object]:
     return {
         "tool": "webglass-cli",
+        "console_script": "webglass",
         "version": __version__,
-        "purpose": "The guarded web operations and evidence plane for AI agents.",
+        "purpose": (
+            "The guarded web operations and evidence plane for AI agents "
+            "(pre-implementation — the web operation surface is specified but not built)."
+        ),
+        "status": "pre-implementation",
+        "status_detail": (
+            "The web operation surface (search, page, action, session, exploration, "
+            "evidence, memory, policy, operation) is specified but not built. The "
+            "commands listed here are the complete implemented surface. See "
+            "https://github.com/agentculture/webglass-cli/issues/1"
+        ),
         "commands": [
             {"path": ["whoami"], "summary": "Identity probe from culture.yaml."},
             {"path": ["learn"], "summary": "Self-teaching prompt."},
@@ -81,7 +106,7 @@ def _as_json_payload() -> dict[str, object]:
             "2": "environment/setup error",
         },
         "json_support": True,
-        "explain_pointer": "webglass-cli explain <path>",
+        "explain_pointer": "webglass explain <path>",
     }
 
 

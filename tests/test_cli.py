@@ -8,6 +8,7 @@ import pytest
 
 from webglass import __version__
 from webglass.cli import main
+from webglass.cli._commands.learn import _as_json_payload
 from webglass.explain import known_paths
 
 
@@ -77,6 +78,36 @@ def test_learn_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert payload["json_support"] is True
 
 
+def test_learn_json_declares_pre_implementation_status() -> None:
+    """A JSON consumer must not infer capabilities that are not built yet.
+
+    The text body carries a Status section; the JSON payload has to say the same
+    thing in a machine-readable way, or an agent reading only `purpose` would
+    assume the web operation surface exists.
+    """
+    payload = _as_json_payload()
+    assert payload["status"] == "pre-implementation"
+    assert "not built" in payload["status_detail"]
+    assert "pre-implementation" in payload["purpose"]
+
+
+def test_learn_examples_use_the_real_console_script(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`learn` must print copy-pasteable commands.
+
+    `[project.scripts]` binds `webglass`; `webglass-cli` is the distribution
+    name and is not an invocable binary, so a command map using it sends an
+    agent straight to "command not found".
+    """
+    rc = main(["learn"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    for verb in ("whoami", "learn", "explain", "overview", "doctor"):
+        assert f"webglass-cli {verb}" not in out, f"learn prints a non-existent binary for {verb}"
+    assert "webglass whoami" in out
+
+
 # --- explain --------------------------------------------------------------
 
 
@@ -105,7 +136,7 @@ def test_explain_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["path"] == ["whoami"]
-    assert "webglass-cli whoami" in payload["markdown"]
+    assert "webglass whoami" in payload["markdown"]
 
 
 def test_explain_unknown_path_errors(capsys: pytest.CaptureFixture[str]) -> None:
@@ -114,6 +145,22 @@ def test_explain_unknown_path_errors(capsys: pytest.CaptureFixture[str]) -> None
     captured = capsys.readouterr()
     assert captured.err.startswith("error:")
     assert "hint:" in captured.err
+
+
+def test_catalog_examples_use_the_real_console_script() -> None:
+    """No explain entry may print `webglass-cli <verb>` as a runnable command.
+
+    Guards the whole catalog, not just the root: the wrong executable name was
+    originally present in every entry's Usage block.
+    """
+    from webglass.explain.catalog import ENTRIES
+
+    for path, body in ENTRIES.items():
+        for verb in ("whoami", "learn", "explain", "overview", "doctor", "cli"):
+            assert f"webglass-cli {verb}" not in body, (
+                f"explain entry {path or '<root>'} prints a non-existent binary "
+                f"'webglass-cli {verb}' — the console script is 'webglass'"
+            )
 
 
 def test_every_catalog_path_resolves(capsys: pytest.CaptureFixture[str]) -> None:

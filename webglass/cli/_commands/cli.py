@@ -15,7 +15,9 @@ from webglass.cli._commands.overview import cli_sections, emit_overview
 
 def cmd_cli_overview(args: argparse.Namespace) -> int:
     emit_overview(
-        "webglass-cli cli",
+        # The command path, so it uses the console script name — unlike the
+        # global `overview`, whose subject is the project name `webglass-cli`.
+        "webglass cli",
         cli_sections(),
         json_mode=bool(getattr(args, "json", False)),
     )
