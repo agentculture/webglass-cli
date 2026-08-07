@@ -10,12 +10,14 @@ Two things this prompt must keep right, because agents act on it directly:
   distribution name and is *not* an invocable binary; printing it in a command
   map sends an agent straight to "command not found".
 * **The backend-honest status.** Both the text body and the JSON payload
-  (``status`` / ``status_detail``, and a parenthetical in ``purpose``) flag that
-  the M1 operation surface (search/page/action/session) is implemented and
-  executes real operations, but no live search or browser backend is wired in
-  yet — those verbs report a structured ``backend_unavailable`` result until
-  M2. A JSON consumer that reads only ``purpose`` must not infer live-web
-  capabilities that do not exist yet.
+  (``status`` / ``status_detail``, and a parenthetical in ``purpose``) say
+  exactly which capability is live. As of build plan t13 the browser backend
+  is real and on by default, so ``page``/``action`` observe real pages;
+  ``search`` needs an API key before it can report anything but
+  ``backend_unavailable``; and the exploration/evidence/memory/policy/
+  operation nouns are not built. A JSON consumer that reads only ``purpose``
+  must not infer a capability that does not exist yet — nor be told a
+  capability is missing when it ships.
 
 Keep both in sync with the ``explain`` root entry in
 :mod:`webglass.explain.catalog`.
@@ -47,14 +49,15 @@ thin Playwright wrapper, not a generic scraper, and not a fact checker.
 Status
 ------
 Pre-implementation overall (see
-https://github.com/agentculture/webglass-cli/issues/1) — but the M1 operation
-surface is now real: `search`, `page`, and `action` build and execute genuine
-WebOperation objects through WebGlassService, and `session` runs against a
-real (in-process) session store. No live search or browser backend is wired
-in by default yet, so those verbs report a structured `backend_unavailable`
-result until the Playwright and search-provider adapters land (M2, build plan
-tasks t11/t13/t15). The exploration, evidence, memory, policy, and operation
-nouns are not built yet.
+https://github.com/agentculture/webglass-cli/issues/1) — but the M2
+observation surface is live: `page` and `action` drive a real headless
+Chromium by default, `session` records survive between one-shot invocations,
+and every verb returns the same structured WebOperationResult the library API
+returns. `search` needs $WEBGLASS_BRAVE_API_KEY; without it, it reports a
+structured `backend_unavailable` result, as do all web verbs under
+WEBGLASS_BROWSER_BACKEND=none. Loopback and private-network targets stay
+denied unless a --policy-profile declares them. The exploration, evidence,
+memory, policy, and operation nouns are not built yet.
 
 Commands
 --------
@@ -98,20 +101,21 @@ def _as_json_payload() -> dict[str, object]:
         "version": __version__,
         "purpose": (
             "The guarded web operations and evidence plane for AI agents "
-            "(pre-implementation overall — the M1 operation surface for search/page/"
-            "action/session is implemented over injectable fakes; live backends land "
-            "at M2)."
+            "(pre-implementation overall — the M2 observation surface for page/action/"
+            "session is live against a real browser; evidence, exploration, and memory "
+            "land at M3)."
         ),
         "status": "pre-implementation",
         "status_detail": (
-            "The M1 operation surface (search, page, action, session) is implemented: "
-            "every verb builds a real WebOperation and executes it through "
-            "WebGlassService, returning the same structured WebOperationResult the "
-            "library API returns. No live search or browser backend is wired in by "
-            "default, so those verbs report a structured 'backend_unavailable' result "
-            "until the Playwright and search-provider adapters land (build plan tasks "
-            "t11/t13/t15). The exploration, evidence, memory, policy, and operation "
-            "nouns are not built yet. See "
+            "The M2 observation surface is live: page and action drive a real headless "
+            "Chromium by default, session records survive between one-shot "
+            "invocations, and every verb returns the same structured "
+            "WebOperationResult the library API returns. search needs "
+            "$WEBGLASS_BRAVE_API_KEY; without it, it reports a structured "
+            "'backend_unavailable' result, as does every web verb under "
+            "WEBGLASS_BROWSER_BACKEND=none. Loopback and private-network targets stay "
+            "denied unless a --policy-profile declares them. The exploration, "
+            "evidence, memory, policy, and operation nouns are not built yet. See "
             "https://github.com/agentculture/webglass-cli/issues/1"
         ),
         "commands": [

@@ -8,22 +8,27 @@ honesty h2).
 
 ``action.press`` classifies as ``EffectClass.REMOTE_ACTION`` by default (see
 :data:`webglass.effects.EFFECT_CLASS_BY_KIND`) — a key press cannot be proven
-navigational outside a declared test profile (build plan t13 wires that
-override in), so at M1 it always previews unless ``--apply`` is passed, and
-an explicit ``--apply`` is always denied (the prepare -> commit -> verify
-protocol lands at M5). This is :class:`~webglass.service.WebGlassService`'s
-own effect-class gate — the CLI does not special-case it.
+navigational on the open web, since ``Enter`` submits forms. So it previews
+and dispatches nothing, and an explicit ``--apply`` is denied (the
+prepare -> commit -> verify protocol lands at M5).
 
-M1 has no browser backend wired in by default (see ``_factory``'s module
-docstring) and no snapshot to follow a link from without one, so ``action
-follow`` always reports a structured failure (exit 1) — ``unknown_snapshot``
-for a ``page-ref`` that names nothing retained, or ``backend_unavailable``
-once a real one does — until build plan t11/t13 land the Playwright adapter.
+The one scoped exception is the spec's 2026-08-07 decision: **under a
+declared test profile** — a ``--policy-profile`` whose ``declared_targets``
+name the app under test — ``press`` classifies as ``observe`` and executes,
+all keys included. The authorization is that profile, expressed in data. Both
+halves of that live in :func:`webglass.cli._factory.declared_target_effect_class`
+and in :class:`~webglass.service.WebGlassService`'s own effect-class gate; no
+handler here special-cases anything.
+
+``action follow`` navigates from a *link reference* on a snapshot this
+process retained, so it pairs with ``page open`` in the same invocation (or a
+``--page-ref`` from one). Cross-invocation snapshot retention is M3.
 """
 
 from __future__ import annotations
 
 import argparse
+from typing import Any
 
 from webglass.cli import _factory
 from webglass.cli._commands.overview import emit_overview
@@ -36,18 +41,31 @@ _OVERVIEW_SECTIONS = [
         "items": [
             "action follow <page-ref> <link-ref> — follow a link reference from a retained "
             "snapshot (never a raw selector or URL).",
-            "action press <keys...> — dispatch a key sequence; classifies as remote-action "
-            "and previews unless a declared test profile overrides it.",
+            "action press <keys...> — dispatch a key sequence to a session's focused "
+            "page, with an optional --delay-ms between keys.",
             "action overview — this description.",
+        ],
+    },
+    {
+        "title": "Effect classes",
+        "items": [
+            "press classifies upward to remote-action by default and previews without "
+            "dispatching anything: on the open web, Enter submits forms.",
+            "Under a --policy-profile whose declared_targets name your app under test, "
+            "press classifies as observe and executes — the profile is the "
+            "authorization, and it is data, not a flag that widens policy.",
+            "--apply is denied in both cases: the prepare -> commit -> verify protocol "
+            "for real remote actions lands at M5.",
         ],
     },
     {
         "title": "Backend status",
         "items": [
-            "M1: no browser backend is wired in yet, so 'action follow' always reports a "
-            "structured failure (exit 1) — 'unknown_snapshot' for a page-ref that names "
-            "nothing retained, or 'backend_unavailable' once a real one does — until the "
-            "Playwright adapter lands (build plan t11/t13).",
+            "A real Chromium is the default backend (build plan t13); set "
+            "WEBGLASS_BROWSER_BACKEND=none for the explicit browser-less posture, in "
+            "which these verbs report a structured 'backend_unavailable' result.",
+            "'action follow' resolves a link reference against a snapshot this process "
+            "retained, so pair it with a 'page open' in the same invocation.",
         ],
     },
 ]
@@ -66,21 +84,20 @@ def _no_verb(args: argparse.Namespace) -> int:
 
 
 def cmd_action_follow(args: argparse.Namespace) -> int:
-    service = _factory.build_service()
-    context = _factory.build_context()
+    service, context = _factory.build_invocation(args)
     operation = _factory.build_operation(
         service,
         context,
         OperationKind.ACTION_FOLLOW,
         target=OperationTarget(page_ref=args.page_ref, element_ref=args.link_ref),
+        session_id=args.session_id,
     )
     result = service.execute(operation, context)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
 
 
 def cmd_action_press(args: argparse.Namespace) -> int:
-    service = _factory.build_service()
-    context = _factory.build_context()
+    service, context = _factory.build_invocation(args)
     apply_state = ApplyState.APPLY if args.apply else ApplyState.PREVIEW
     operation = _factory.build_operation(
         service,
@@ -93,6 +110,13 @@ def cmd_action_press(args: argparse.Namespace) -> int:
     )
     result = service.execute(operation, context)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
+
+
+def _finish(parser: argparse.ArgumentParser, handler: Any) -> None:
+    """The flags and defaults every web verb shares (mirrors ``page.py``)."""
+    _factory.add_policy_profile_argument(parser)
+    parser.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    parser.set_defaults(func=handler)
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -111,21 +135,36 @@ def register(sub: argparse._SubParsersAction) -> None:
     fl = noun_sub.add_parser("follow", help="Follow a link reference from a retained snapshot.")
     fl.add_argument("page_ref", help="A snapshot id from a previous page open.")
     fl.add_argument("link_ref", help="A 'link:<index>' reference from that snapshot.")
-    fl.add_argument("--json", action="store_true", help="Emit structured JSON.")
-    fl.set_defaults(func=cmd_action_follow)
+    fl.add_argument("--session-id", default=None, help="Navigate in this session.")
+    _finish(fl, cmd_action_follow)
 
     pr = noun_sub.add_parser("press", help="Dispatch a key sequence.")
-    pr.add_argument("keys", nargs="+", help="Key names to press in order (e.g. 'a' 'Enter').")
+    pr.add_argument(
+        "keys",
+        nargs="+",
+        help=(
+            "Key names to press, in order (e.g. 'a' 'ArrowRight' 'Enter'). Names are "
+            "the browser's own KeyboardEvent.key values."
+        ),
+    )
     pr.add_argument("--session-id", default=None, help="The session to dispatch keys on.")
     pr.add_argument("--page-ref", default=None, help="Fall back to this snapshot's session.")
-    pr.add_argument("--delay-ms", type=float, default=0, help="Delay between key presses.")
+    pr.add_argument(
+        "--delay-ms",
+        type=float,
+        default=0,
+        help=(
+            "Wait this long between consecutive keys. Use it when the page needs time "
+            "to react to each key (an animation frame, a debounce)."
+        ),
+    )
     pr.add_argument(
         "--apply",
         action="store_true",
         help=(
-            "Request apply instead of preview (always denied at M1 — "
-            "prepare/commit/verify lands at M5)."
+            "Request apply instead of preview. Always denied — the "
+            "prepare -> commit -> verify protocol lands at M5. To actually dispatch "
+            "keys, run under a --policy-profile declaring your app under test."
         ),
     )
-    pr.add_argument("--json", action="store_true", help="Emit structured JSON.")
-    pr.set_defaults(func=cmd_action_press)
+    _finish(pr, cmd_action_press)
