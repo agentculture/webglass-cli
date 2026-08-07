@@ -1,0 +1,22 @@
+{
+  "plan_slug": "implement-webglass-issue-1",
+  "schema_version": 1,
+  "created": "2026-08-07T20:00:56Z",
+  "updated": "2026-08-07T20:19:03Z",
+  "deviations": [
+    {
+      "id": "d1",
+      "what": "M2 per-hop redirect policy enforcement is post-hoc, not in-line: the adapter checks policy pre-navigation and the service re-evaluates every returned hop (denying results that traversed a denied hop, with an unrevalidated-redirects degraded-evidence warning), but the browser may contact an intermediate redirect target before denial \u2014 Playwright route interception is not re-invoked for auto-followed redirects, so in-line blocking would have silently failed open; true in-line enforcement needs a policy-enforcing local proxy",
+      "task_ref": "t11",
+      "reason": "probe during t11: Playwright fires route handlers once per navigation, not per redirect hop \u2014 interception-based enforcement fails open, so the safer post-hoc containment shape was shipped instead",
+      "affects": [
+        "t13",
+        "c12",
+        "h8"
+      ],
+      "origin": "llm",
+      "status": "approved",
+      "classification": "needs-follow-up"
+    }
+  ]
+}
