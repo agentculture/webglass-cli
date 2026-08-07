@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebGlass Fixture: Throwing Page</title>
+  </head>
+  <body>
+    <h1 id="page-marker" data-fixture="throw">Throwing Page</h1>
+    <p>
+      This page's script throws synchronously on load. A browser-driven
+      observer (M2) must record this as an uncaught page error with a source
+      location -- and must be able to tell this page apart from the clean
+      fixture by evidence alone, not by guessing from markup.
+    </p>
+    <script>
+      throw new Error("WebGlass fixture: deliberate synchronous throw on load");
+    </script>
+  </body>
+</html>

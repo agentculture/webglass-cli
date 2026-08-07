@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebGlass Fixture: Agent State Node</title>
+  </head>
+  <body>
+    <h1 data-fixture="agent-state">Agent State</h1>
+    <p>
+      This page exposes machine-readable state the way a small game or app
+      under test might: a single JSON node an extraction verb can target by
+      selector, without needing the rest of the page.
+    </p>
+    <script type="application/json" id="agent-state">
+      { "lives": 3, "level": 1, "door": "locked" }
+    </script>
+    <div
+      id="agent-state-data-attr"
+      data-lives="3"
+      data-level="1"
+      data-door="locked"
+    ></div>
+  </body>
+</html>

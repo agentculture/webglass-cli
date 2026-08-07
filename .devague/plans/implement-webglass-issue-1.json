@@ -1,0 +1,826 @@
+{
+  "slug": "implement-webglass-issue-1",
+  "title": "implement WebGlass (issue #1)",
+  "frame_slug": "implement-webglass-issue-1",
+  "schema_version": 4,
+  "status": "exported",
+  "created": "2026-08-07T17:52:57Z",
+  "updated": "2026-08-07T17:56:29Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "WebGlass ships its first useful release: agents search, open, read, inspect, follow, and screenshot the web through guarded, token-efficient, evidence-producing operations, per the issue 1 brief",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "anything the announcement presents as shipped is covered by the M0-M2 test suites, not narrative \u2014 the issue 1 section 20 definition-of-done subset is demonstrable end to end",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "One operation lifecycle (WebOperation -> WebOperationResult) is shared by the Python API, the CLI, and the Colleague tool adapter; the library and CLI return the same semantic result, text output is only a rendering \u2014 never architected around CLI handlers or direct Playwright calls (issue 1 sections 1 and 14)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "no CLI handler for a web verb contains operation logic \u2014 it builds a WebOperation, calls the one service, renders the result; a library caller invoking the same operation gets a semantically identical result",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c3",
+      "kind": "requirement",
+      "text": "Four state kinds stay separate objects \u2014 browser session (volatile, sensitive, never emitted wholesale), exploration graph (durable, resumable without a live browser), evidence (append-only observations), and web-memory (searchable index, never a credential store) \u2014 connected per task by a WebContext that holds references and policy, not copies (issue 1 section 2)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "no object holds two state kinds and WebContext holds only references and policy: closing a session never touches evidence or exploration, and an exploration resumes with no live browser process",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c4",
+      "kind": "requirement",
+      "text": "Three explicit effect classes: observe executes when authorized, local-state needs an authorized state scope, remote-action previews by default and runs prepare -> commit -> verify with an expiring ActionPlan; classification uncertainty classifies upward; commit is never inferred from prepare and an uncertain commit is never auto-retried \u2014 it reports outcome_unknown (issue 1 section 3)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "every operation kind declares exactly one effect class; ambiguous controls classify as remote-action; commit demands a valid unexpired plan id and re-checks page generation, target, session owner, and policy; an uncertain outcome reports outcome_unknown and is never auto-retried",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "Delivery follows the staged sequence M0 -> M5 in order: M0 (characterization tests, schema versioning decision, deterministic test pages plus hostile fixtures, boundary docs) completes before any Playwright implementation; M6 items are on-demand only (issue 1 section 17)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "no playwright import exists anywhere in the repo until the M0 characterization suite and the schema-versioning decision are merged; milestone PRs land in M0 -> M1 -> M2 order",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c6",
+      "kind": "requirement",
+      "text": "Every WebGlass noun registers onto the existing CLI skeleton: a module under webglass/cli/_commands exposing register(sub) wired at the marked spot in _build_parser; handlers raise CliError, results go to stdout and errors to stderr with the hint: line, exit codes stay 0/1/2 \u2014 the skeleton is the substrate, not replaced (webglass/cli/__init__.py, _errors.py, _output.py)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "every new verb registers through a _commands module register(sub); no handler writes directly to a stream or lets a non-CliError escape; results never appear on stderr; exit codes stay 0/1/2",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c7",
+      "kind": "requirement",
+      "text": "Every new noun/verb ships an explain catalog entry keyed by its path tuple, every noun with action-verbs also exposes overview, and the learn command map plus its JSON status field are updated as verbs land \u2014 the teken rubric gate (uv run teken cli doctor . --strict) and test_every_catalog_path_resolves enforce this in CI (webglass/explain/catalog.py, _commands/cli.py, _commands/learn.py, .github/workflows/tests.yml lint job)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "uv run teken cli doctor . --strict passes on every PR; every new path tuple resolves in the explain catalog; learn lists every implemented verb and its status text matches what actually ships",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c8",
+      "kind": "boundary",
+      "text": "The operation-model modules stay dependency-light and Playwright types never enter the public API, enforced behind protocol seams (SearchProvider, FetchBackend, BrowserBackend, BrowserSessionStore, MemoryStore, ArtifactStore, WebPolicyEvaluator, Clock/ID providers) \u2014 but Playwright itself is a CORE runtime dependency (user decision 2026-08-07, q2, overriding the issue 1 section 12 recommended extra/adapter-package direction); pyproject dependencies gains playwright, and the stale dependencies-are-empty language in CLAUDE.md and the explain/learn text must be updated when this lands",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h14",
+      "kind": "honesty",
+      "text": "no playwright import exists outside the adapter module; public API type hints contain no Playwright types; an import-boundary test enforces both",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c9",
+      "kind": "boundary",
+      "text": "The existing introspection surface is frozen compatibility contract: whoami/learn/explain/overview/doctor behavior, --json, the stdout/stderr split, and exit codes stay compatible; tests/test_cli.py and tests/test_cli_introspection.py already characterize much of it and M0 extends that characterization before anything changes (issue 1 section 19)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h15",
+      "kind": "honesty",
+      "text": "the existing characterization tests keep passing unmodified through M0-M2 \u2014 extended, never rewritten to accommodate a regression",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c10",
+      "kind": "boundary",
+      "text": "Dependency direction stays one-way: WebGlass never reaches Colleague internals (the M4 provider lands in the colleague repo by composition), workspace crossings go only through the shell-cli artifact bridge (agentculture/shell-cli exists: the guarded local operations plane for AI agents), and the policy core never reads .colleague files \u2014 Colleague passes an effective profile (issue 1 vision, sections 13 and 15)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h16",
+      "kind": "honesty",
+      "text": "webglass code never imports Colleague and never reads .colleague files; workspace paths never appear in operation arguments except as opaque artifact references",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "Web content is adversarial input: every result preserves the four trust zones (trusted control metadata, untrusted source material, sensitive caller data, derived transformations); deny file:/javascript:/browser-internal schemes and loopback/link-local/private/cloud-metadata targets; revalidate every redirect hop; keep the Chromium sandbox; quarantine downloads; malformed policy never silently fails open (issue 1 sections 10 and 11)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "policy denies file:/javascript:/browser-internal schemes and loopback/link-local/private/metadata targets by default; every redirect hop is re-evaluated; malformed policy yields a structured error and never fails open; trust zones are distinct fields in every result schema",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c13",
+      "kind": "requirement",
+      "text": "WebGlass owns its test surface per issue 1 section 18 \u2014 schema, extraction/stable-reference, SSRF/redirect, session isolation, evidence, adapter conformance, and CLI contract tests; no default test depends on a live public website (deterministic local sites and hostile fixtures only); the coverage gate fail_under=60 in pyproject stays enforced",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "the default test suite passes with external network access unavailable (localhost fixtures only); coverage stays at or above fail_under=60; Playwright integration tests target only local deterministic sites",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c16",
+      "kind": "boundary",
+      "text": "Identity and mesh plumbing stay untouched by product work: the hand-rolled culture.yaml parser (read_agent_fields in whoami.py), the doctor backend-consistency checks, and AGENTS.colleague.md residency remain as-is; adding a YAML dependency would be a separate architectural decision, not a side effect (whoami.py, doctor.py, culture.yaml)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h17",
+      "kind": "honesty",
+      "text": "whoami/doctor behavior and read_agent_fields stay byte-identical through the M0-M2 PRs and no YAML dependency appears",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c17",
+      "kind": "requirement",
+      "text": "Stale self-description text is cleaned up as nouns land: whoami.py line 8 still says \"When you clone this template\"; CLAUDE.md Known gotchas still claims the README uses the non-existent webglass-cli binary but README.md already uses webglass \u2014 fix the docs that lag the code (README.md, CLAUDE.md, whoami.py)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "once product nouns land, no runtime or doc text describes this repo as a clonable template, and every CLAUDE.md gotcha matches observable reality",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c18",
+      "kind": "requirement",
+      "text": "webglass-cli is also a first-class tool for testing web-based solutions, including on CI: an agent or pipeline drives a locally served app headlessly through the same guarded operations (open/read/inspect/screenshot), asserts against structured JSON results and exit codes, and keeps evidence records (snapshots, screenshots) as CI artifacts (user direction, 2026-08-07; extends the research-oriented framing of issue 1)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "a CI job can start a local web app, drive it with webglass open/read/inspect/screenshot headlessly, and assert on JSON output and exit codes \u2014 with no WebGlass-side test framework or assertion DSL involved",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c19",
+      "kind": "requirement",
+      "text": "The web policy supports an explicit test/CI profile that allows loopback or declared private targets for an app under test without weakening the default: issue 1 section 10 denies loopback/link-local/private-network/metadata targets by default, so the CI-testing use case is enabled by an explicit allow in the effective policy profile \u2014 never by relaxing the default denylist, and malformed policy still never fails open",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "loopback and private targets stay denied by default; enabling an app under test requires an explicit allow in the effective policy profile scoped to declared targets; a malformed profile still fails closed",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c20",
+      "kind": "boundary",
+      "text": "In the testing story WebGlass stays the operations and evidence plane: assertions, test orchestration, retries, and pass/fail logic belong to the caller (CI script or agent) \u2014 WebGlass does not grow a test-runner or assertion DSL, mirroring the Colleague ownership split and the section 21 discipline against mirroring Playwright (whose test framework already owns that space)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h18",
+      "kind": "honesty",
+      "text": "the public surface gains no assert/expect/test-runner verbs; the CI recipe consumes ordinary JSON results with caller-side assertions only",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c21",
+      "kind": "requirement",
+      "text": "Search API keys are runtime configuration, never product state: supplied via environment/config, redacted from logs and evidence, never persisted to web-memory or artifacts \u2014 consistent with the section 8 do-not-persist list and the never-a-credential-store invariant, and now needed at M1/M2 because the first real provider is API-based (q3 decision)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "no search API key ever appears in logs, evidence, memory, artifacts, or JSON results; keys are read from environment or config at call time only",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c22",
+      "kind": "audience",
+      "text": "AI agents and their operators: Colleague residents composing WebGlass as a Python library, mesh agents and humans driving the webglass CLI directly, and CI pipelines using the same verbs to test locally served web apps",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h19",
+      "kind": "honesty",
+      "text": "each named audience has a working entry path at M2: library import for Colleague, the webglass console script for agents and humans, a documented CI recipe for pipelines",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c23",
+      "kind": "after_state",
+      "text": "Through M2, an agent can search, open, read, inspect, follow, press keys into, and screenshot the web via stable structured operations \u2014 policy-enforced, token-budgeted, omission-declaring, with console/page-error evidence and sessions reusable across one-shot CLI invocations, over a replaceable Playwright/Chromium adapter (a core dependency) \u2014 and a CI pipeline or colleague drives a locally served app with the same verbs under an explicit test-profile allow",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h20",
+      "kind": "honesty",
+      "text": "every listed verb is demonstrable against local fixture sites at M2 with policy verdicts, budgets, and omission declarations visible in the structured result",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c24",
+      "kind": "before_state",
+      "text": "Today only the introspection scaffold exists (whoami/learn/explain/overview/doctor); there is no web operation surface \u2014 an agent needing the web falls back to raw browser automation or ad-hoc fetch with no policy, no budgets, no stable references, and no evidence trail",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h21",
+      "kind": "honesty",
+      "text": "accurate as of 2026-08-07: the repo ships only the introspection verbs, verified against webglass/cli/_commands",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c25",
+      "kind": "why_it_matters",
+      "text": "Unguarded browsing wastes agent tokens on raw HTML and invites SSRF and prompt-injection risk; without durable evidence records, agent web claims are unauditable \u2014 and web-app testing in CI currently needs a whole separate toolchain instead of the same guarded operations",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h22",
+      "kind": "honesty",
+      "text": "the shipped design addresses each named risk concretely: token budgets and lenses for cost, target denylists for SSRF, trust zones for injection, evidence records for auditability",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c26",
+      "kind": "success_signal",
+      "text": "The M0-M2 definition-of-done subset holds: characterization plus product suites green in CI with no live public website; the teken rubric gate passes with every new noun; a CI job drives a locally served app through webglass and asserts on JSON results and exit codes; the seven issue 9 acceptance criteria pass as fixture-based M2 tests (localhost open, console/page-error evidence, selector extract, key sequences, screenshot to file, cross-invocation session reuse, agent-first contract); every result declares live-vs-cached and omissions; policy denies loopback by default yet allows the declared app under test",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h23",
+      "kind": "honesty",
+      "text": "every listed signal is mechanically checkable in CI \u2014 none requires human judgment to evaluate",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c27",
+      "kind": "requirement",
+      "text": "Console and page-error evidence is part of the observation surface: WebGlass captures the running pages console messages and uncaught errors (with source locations) and exposes them via a documented verb in --json \u2014 a page that throws on load is distinguishable from a working page by CLI evidence alone, and a clean page yields an explicitly empty error list (issue 9 item 2; the NEBULA field lesson: node --check passed on a page that was dead in the browser)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h24",
+      "kind": "honesty",
+      "text": "a fixture page that throws on load yields the error text and source location in --json output, and a clean page yields an explicitly empty error list \u2014 a dead canvas is distinguishable from a working game by CLI evidence alone",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h28",
+      "kind": "honesty",
+      "text": "console and page-error text is untrusted source material: labeled as such in results and evidence, and never rendered as a WebGlass diagnostic, warning, or instruction \u2014 a hostile page logging WEBGLASS WARNING to console cannot spoof tool output",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c28",
+      "kind": "requirement",
+      "text": "action press ships inside the M0-M2 slice: single keys and key sequences with configurable inter-key delay delivered to the focused page, so a caller can drive a declared app under test (platformer controls); under a general non-test policy profile the verbs classification stays conservative per classify-upward (issue 9 item 4 \u2014 pulled forward from the M5 staging for this one verb)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h25",
+      "kind": "honesty",
+      "text": "a fixture page that logs keydown events shows the exact pressed sequence in its state after action press; under a general non-test profile the same verb still classifies conservatively",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c29",
+      "kind": "requirement",
+      "text": "Sessions are reusable across separate one-shot CLI invocations: session create returns an id that later subprocess calls attach to, page state persists across those calls until session close, and callers never hold a daemon connection \u2014 the live-process lease machinery of brief section 9 makes this work (issue 9 item 6)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h26",
+      "kind": "honesty",
+      "text": "state set by an action in one CLI invocation is visible to a later read in the same session across separate subprocesses until session close; callers never hold a daemon connection",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c30",
+      "kind": "requirement",
+      "text": "Selector-scoped extraction and screenshot-to-file: page extract can return a single selectors content in --json without the whole page (the app under test exposes an agent-readable state node), and page screenshot --out PATH writes a decodable PNG at the caller-given path (issue 9 items 3 and 5)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h27",
+      "kind": "honesty",
+      "text": "extracting a single selector returns exactly that content in --json without the rest of the page, and page screenshot --out writes a decodable PNG at the caller-given path",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c32",
+      "kind": "requirement",
+      "text": "Browser provisioning is explicit and diagnosable: M2 CI installs a pinned Chromium (playwright install, cached); the non-browser test suite passes with no browser present; webglass doctor gains browser-capability checks \u2014 playwright importable, chromium installed, pinned versions reported, and a usable-sandbox check that fails actionably when the host blocks unprivileged user namespaces (probed on this host: chrome aborts with No usable sandbox on AppArmor-restricted Ubuntu) \u2014 never silently degrading to --no-sandbox (challenge pass: tests.yml and publish.yml have no browser step today; brief section 12)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h29",
+      "kind": "honesty",
+      "text": "a CI run with no browser installed still passes the non-browser suite, and doctor on a browserless or sandbox-restricted host reports the specific failed capability with remediation \u2014 never a crash and never a silent --no-sandbox fallback",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c33",
+      "kind": "requirement",
+      "text": "The cross-invocation session mechanism treats its connect endpoint as secret-equivalent: the CDP/ws endpoint grants full browser control, so it gets restrictive file permissions and never appears in JSON output, logs, or evidence; concurrent attaches to one session are serialized or refused via the lease; a crashed caller leaves no orphaned browser process past lease expiry and session clean reaps deterministically (challenge probe validated CDP reattach with in-memory JS state surviving across processes; brief section 9)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h30",
+      "kind": "honesty",
+      "text": "the stored endpoint is unreadable by other users; no JSON result, log line, or evidence record contains it; two concurrent attaches to one session never interleave \u2014 one proceeds, the other gets a structured lease refusal; after lease expiry the browser process is gone",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c34",
+      "kind": "requirement",
+      "text": "Budgets, timeouts, and cancellation are structured results, not backend failures: every operation charges the context budget (requests, transferred bytes, browser time, artifact bytes, and agent-visible tokens as labeled heuristic estimates \u2014 no tokenizer dependency) and enforces its timeout; exhaustion, timeout, and cancellation return budget-exhausted/timed_out/cancelled lifecycle results bounded for subprocess callers with 120-300s budgets (challenge pass: the exported spec carried budgets only in the after_state, not as a requirement; brief sections 1 and 14; issue 9 item 7)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h31",
+      "kind": "honesty",
+      "text": "exhausting any budget dimension or hitting a timeout yields the structured lifecycle result with partial evidence preserved \u2014 never a raw backend exception \u2014 and token figures are labeled as estimates",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c35",
+      "kind": "boundary",
+      "text": "The --out convenience never becomes a quarantine bypass: caller-path writes apply only to WebGlass-rendered artifacts (screenshots); remote-origin download bytes never reach a caller-given path and stay quarantined behind the shell-cli export bridge per brief section 13 (challenge pass: c30 vs section 13 tension examined)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h32",
+      "kind": "honesty",
+      "text": "no code path writes remote-origin response bytes to a caller-supplied path; screenshot --out writes only WebGlass-rendered PNG output; download verbs keep quarantine when they arrive in M5",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c36",
+      "kind": "boundary",
+      "text": "WebGlass never starts, stops, or supervises the app-under-test server process \u2014 the caller owns that lifecycle (colleague or shell-cli territory); WebGlass only observes and drives it via URL targets under the declared test profile (challenge pass: issue 9 has colleague building and serving the game; ownership split)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h33",
+      "kind": "honesty",
+      "text": "webglass never spawns or kills the app-under-test process; an unreachable target yields a structured connection error telling the caller to check their server",
+      "deferred": false,
+      "deferred_reason": ""
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "M0: extend characterization tests locking every existing contract",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "characterization suite locks the stdout/stderr split, exit codes, JSON shapes, explain catalog resolution, and whoami/doctor identity behavior \u2014 and passes unmodified against current main",
+        "an import-scan test asserts no playwright import and no Colleague import or .colleague read exists anywhere in the repo at M0"
+      ],
+      "deps": [],
+      "covers": [
+        "c9",
+        "h15",
+        "c16",
+        "h17",
+        "c24",
+        "h21",
+        "h5",
+        "c10",
+        "h16"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t2",
+      "summary": "M0: deterministic + hostile fixture site harness",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "fixture sites served locally from the test harness with zero external network: clean page, throwing-on-load page, keydown-logging page, agent-state-node page, redirect chains including redirect-to-private-target, spoofed-console page, boilerplate-heavy page",
+        "the default suite passes with external network unavailable and coverage stays at or above fail_under=60"
+      ],
+      "deps": [],
+      "covers": [
+        "c13",
+        "h9"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t3",
+      "summary": "M0: schema versioning decision, boundary docs, stale-text cleanup",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "operation/evidence schema version policy documented; Colleague and shell-cli boundaries documented; whoami.py clonable-template line and the stale CLAUDE.md README gotcha fixed; CLAUDE.md dependencies-are-empty language updated to record the Playwright-in-core decision",
+        "the M0 PR contains only tests, fixtures, and docs \u2014 no product code \u2014 and lands before any M1 PR"
+      ],
+      "deps": [],
+      "covers": [
+        "c17",
+        "h10",
+        "c5"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t4",
+      "summary": "M1: operation, result, and effects models (operations.py, results.py, effects.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "WebOperation and WebOperationResult carry the section 1 field sets including schema version; lifecycle states enumerated; every operation kind declares exactly one effect class and ambiguous classification resolves upward (unit-tested)",
+        "result models carry structurally separate trusted/untrusted/sensitive/derived fields"
+      ],
+      "deps": [
+        "t1",
+        "t3"
+      ],
+      "covers": [
+        "c4",
+        "h4"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t5",
+      "summary": "M1: policy core with default denylists and test-profile allows (policy.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "denies file:/javascript:/browser-internal schemes and loopback/link-local/private/metadata targets by default; re-evaluates every redirect hop; an explicit profile allow admits only declared app-under-test targets; malformed policy returns a structured error, never fails open (property-tested)"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c12",
+        "h8",
+        "c19",
+        "h12"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t6",
+      "summary": "M1: adapter protocols, fake backends, conformance tests (adapters/)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "SearchProvider/FetchBackend/BrowserBackend/BrowserSessionStore/ArtifactStore/WebPolicyEvaluator protocol seams plus Clock/ID providers defined; fake adapters drive the full operation lifecycle in tests; a conformance suite any adapter must pass exists; the import-boundary test asserts no playwright import outside the adapter module and no Playwright types in public API hints"
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c8",
+        "h14"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t7",
+      "summary": "M1: page snapshot, extraction, and stable references (pages.py, extraction.py, references.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "PageSnapshot carries stable snapshot-scoped references; all lenses preserve block ids; deterministic extraction declares every omitted or truncated region; stale references fail clearly (unit-tested)"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [],
+      "instruction": ""
+    },
+    {
+      "id": "t8",
+      "summary": "M1: WebContext and four-store separation, sessions store first (sessions.py, context)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "the four state kinds are separate modules; WebContext holds only references and policy; closing a session touches neither evidence nor exploration; exploration and memory are typed interface stubs deferred to M3 (issue 8) with no implementation entangled"
+      ],
+      "deps": [
+        "t3"
+      ],
+      "covers": [
+        "c3",
+        "h3"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t9",
+      "summary": "M1: operation service with budgets, timeouts, cancellation (service.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "one service serves library and CLI callers; per-dimension budget counters (requests, bytes, browser time, artifact bytes, labeled heuristic token estimates); exhaustion, timeout, and cancellation yield structured budget-exhausted/timed_out/cancelled results preserving partial evidence; bounded for 120-300s subprocess budgets"
+      ],
+      "deps": [
+        "t4",
+        "t8"
+      ],
+      "covers": [
+        "c2",
+        "c34",
+        "h31"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t10",
+      "summary": "M1: CLI noun registration over fakes + introspection updates (cli/_commands, catalog, learn)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "search/page/action/session verbs register per the skeleton pattern; a per-verb contract test asserts the CLI --json payload equals the library result rendering; every new path tuple resolves in the explain catalog; every action-verb noun exposes overview; learn lists every implemented verb; uv run teken cli doctor . --strict passes"
+      ],
+      "deps": [
+        "t9",
+        "t6"
+      ],
+      "covers": [
+        "c6",
+        "h6",
+        "c7",
+        "h7",
+        "h2"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t11",
+      "summary": "M2: Playwright/Chromium adapter with detached-session reattach (adapters/playwright.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "launches a pinned Chromium; an integration test proves CDP reattach to a detached browser with in-memory JS state surviving across separate processes (mirrors the challenge-pass probe); no Playwright types cross the protocol seam; sandbox availability is detected and unavailability yields a structured error \u2014 never a silent --no-sandbox fallback"
+      ],
+      "deps": [
+        "t6",
+        "t2"
+      ],
+      "covers": [
+        "c29",
+        "h26"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t12",
+      "summary": "M2: session lifecycle verbs, endpoint secrecy, leases, cleanup (session create/list/show/close/clean)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "the stored endpoint file is 0600-class and absent from JSON output, logs, and evidence (planted-secret test); concurrent attaches to one session: one proceeds, the other receives a structured lease refusal; session clean reaps expired leases and their browser processes"
+      ],
+      "deps": [
+        "t11",
+        "t8"
+      ],
+      "covers": [
+        "c33",
+        "h30"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t13",
+      "summary": "M2: observation verbs live against fixtures (page open/read/inspect/extract/links/screenshot, action follow/press)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "the throwing fixture yields error text and source location in --json and the clean page yields an explicitly empty error list; the spoofed-console fixture renders only under untrusted labels, never as a WebGlass warning",
+        "the keydown fixture shows the exact pressed sequence after action press (observe under the declared test profile, classify-upward elsewhere); selector-scoped extract returns exactly one selectors content; page screenshot --out writes a decodable PNG and is the only caller-path write",
+        "an unreachable app-under-test target yields a structured connection error telling the caller to check their server; webglass never spawns or kills that process"
+      ],
+      "deps": [
+        "t11",
+        "t12",
+        "t10",
+        "t5",
+        "t7"
+      ],
+      "covers": [
+        "c27",
+        "h24",
+        "h28",
+        "c28",
+        "h25",
+        "c30",
+        "h27",
+        "c35",
+        "h32",
+        "c36",
+        "h33"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t14",
+      "summary": "M2: doctor browser diagnostics + CI browser provisioning (doctor.py, workflows)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "doctor reports playwright-importable, chromium-installed, pinned-version, and usable-sandbox checks with actionable remediation in the existing rubric check shape; the workflows provision a pinned cached Chromium only for the browser-integration job; a browserless run still passes the non-browser suite"
+      ],
+      "deps": [
+        "t11"
+      ],
+      "covers": [
+        "c32",
+        "h29"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t15",
+      "summary": "M2: real API search provider + key redaction (adapters/, proposed vendor: Brave Search API)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a SearchProvider implementation for the chosen API vendor sits behind the seam and passes the adapter conformance suite; keys come only from environment/config at call time; a planted-key redaction test asserts absence from every output and store; provider tests use recorded/fake fixtures \u2014 no live API in the default suite"
+      ],
+      "deps": [
+        "t6"
+      ],
+      "covers": [
+        "c21",
+        "h13"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t16",
+      "summary": "M2: CI recipe, definition-of-done sweep, audience entry paths (docs, example workflow, status text)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "a documented GitHub Actions recipe starts a local fixture app and drives it via webglass, asserting on JSON results and exit codes with caller-side assertions only; the seven issue 9 acceptance criteria pass as fixture-based tests",
+        "the section 20 definition-of-done checklist restricted to M0-M2 is walked with each item pointing at a passing test; learn/README/explain status text updated to shipped reality; library import, console script, and CI recipe entry paths all demonstrated"
+      ],
+      "deps": [
+        "t13",
+        "t14",
+        "t15"
+      ],
+      "covers": [
+        "c1",
+        "h1",
+        "c18",
+        "h11",
+        "c20",
+        "h18",
+        "c22",
+        "h19",
+        "c23",
+        "h20",
+        "c25",
+        "h22",
+        "c26",
+        "h23"
+      ],
+      "instruction": ""
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "NDJSON/event streaming (brief section 14, listed in M1) is deliberately deferred out of this plan \u2014 the first consumer calls one-shot subprocesses; revisit at M3/M4 planning (frame park v5)",
+      "kind": "follow_up",
+      "task_id": null,
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r2",
+      "text": "Platform support beyond Linux CI (macOS/Windows provisioning and reattach mechanics) unexamined \u2014 first consumers are Linux (frame park v4)",
+      "kind": "unknown_nonblocking",
+      "task_id": null,
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r3",
+      "text": "Search API vendor: Brave Search API proposed in t15 (real API, free tier, key-based; DDG has no official API) \u2014 vendor is final only when the user confirms t15 (resolves the q3 finalize-at-plan-time clause)",
+      "kind": "unknown_nonblocking",
+      "task_id": null,
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r4",
+      "text": "Chromium sandbox on CI: ubuntu-24.04 runners restrict unprivileged user namespaces via AppArmor (probed locally: chrome aborts) \u2014 t14 must verify the provisioning path yields a usable sandbox on GitHub Actions runners",
+      "kind": "unknown_nonblocking",
+      "task_id": "t14",
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r5",
+      "text": "colleague#387 timeline couples to M2 (issue 9): items 1-4 of their brief are load-bearing for the proof \u2014 if M1 slips materially, tell colleague on the issue 9 thread rather than letting silence stand",
+      "kind": "unknown_nonblocking",
+      "task_id": null,
+      "resolved": false,
+      "resolution": ""
+    }
+  ]
+}

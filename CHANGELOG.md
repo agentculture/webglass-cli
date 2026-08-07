@@ -5,6 +5,80 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-08
+
+### Added
+
+- **The WebGlass M0–M2 product surface** per the
+  [issue #1](https://github.com/agentculture/webglass-cli/issues/1) brief,
+  built through the devague chain (scope → think → challenge → spec-to-plan →
+  assign-to-workforce; spec `docs/specs/2026-08-07-implement-webglass-issue-1.md`,
+  plan `docs/plans/2026-08-07-implement-webglass-issue-1.md`, 16 tasks in 7
+  waves):
+  - **Operation core** — `WebOperation`/`WebOperationResult` models with
+    schema versioning, seven lifecycle states, three effect classes with
+    classify-upward (`effects.py`), four structurally separate trust zones,
+    and a single `WebGlassService` lifecycle shared by the library and CLI
+    (per-verb contract tests assert `--json` output equals the library
+    result).
+  - **Web policy core** (`policy.py`) — default denial of `file:`/
+    `javascript:`/browser-internal schemes and loopback/link-local/private/
+    cloud-metadata targets (32 stable rule ids, legacy-encoding and
+    IPv4-in-IPv6 bypasses closed, userinfo URLs denied); per-hop redirect
+    evaluation; explicit `declared_targets` test-profile allows for apps
+    under test; malformed policy fails closed.
+  - **Page snapshots and deterministic extraction** (`pages.py`,
+    `extraction.py`, `references.py`) — stable snapshot-scoped refs
+    (`block:N`, `link:N`), progressive-disclosure lenses sharing block ids,
+    every omission declared, selector-scoped extraction, labeled heuristic
+    token estimates, stale refs failing clearly.
+  - **Budgets, timeouts, cancellation** — five budget dimensions with
+    reserve-before/charge-after accounting; exhaustion, timeout, and
+    cancellation are structured results, never raw exceptions.
+  - **Playwright/Chromium adapter** (`adapters/playwright.py`) — Playwright
+    is now a **core runtime dependency** (recorded 2026-08-07 decision,
+    overriding issue #1 §12's extra/adapter recommendation); detached-browser
+    CDP reattach, sandbox-unavailability detection with structured refusal
+    (never a silent `--no-sandbox`), console/page-error evidence with source
+    locations.
+  - **File-backed sessions** (`adapters/session_store.py`) — cross-invocation
+    reattach by session id (in-memory JS state survives between one-shot CLI
+    processes), 0600 records with the secret-equivalent endpoint redacted
+    from all output, `flock` leases with crash recovery, `session clean`
+    reaping browsers and profiles.
+  - **CLI web nouns** — `search`, `page open|read|inspect|extract|links|
+    screenshot`, `action follow|press`, `session create|list|show|close|clean`,
+    all with `--json`, explain-catalog entries, noun overviews, and the
+    teken agent-first rubric gate green; `page screenshot --out` writes a
+    decodable PNG; `page inspect --lens console` reports explicitly empty
+    lists on clean pages; `action press` classifies observe only under a
+    declared test profile (spec decision c37), previewing otherwise.
+  - **Brave Search API adapter** (`adapters/brave.py`) — keys from
+    environment only, planted-key redaction proven across every output.
+  - **Doctor browser diagnostics** — playwright/chromium/version/sandbox/
+    state-dir checks with actionable remediation; CI gained a `browser-test`
+    job (pinned cached Chromium, AppArmor userns sysctl fix) and an
+    `example-webapp-test.yml` workflow running the documented CI recipe
+    (`docs/ci-recipe.md`) that drives a local fixture app through the real
+    CLI.
+  - **M0 grounding** — characterization + import-boundary tests, a
+    deterministic + hostile local fixture-site harness (no default test
+    touches a live website), `docs/schema-versioning.md`, and
+    `docs/boundaries.md`.
+- Test suite grew from 26 to 2,042 collected tests (2,037 passing with the
+  browser enabled; coverage ≈96%).
+
+### Changed
+
+- Every self-description surface (README, CLAUDE.md, `learn`, `explain` root)
+  now reports the shipped M0–M2 surface honestly, with M3+ deferred to
+  [issue #8](https://github.com/agentculture/webglass-cli/issues/8) and the
+  approved deviation d1 (post-hoc redirect containment, in-line blocking
+  needs a policy proxy) tracked in
+  [issue #10](https://github.com/agentculture/webglass-cli/issues/10).
+  Consumer brief [issue #9](https://github.com/agentculture/webglass-cli/issues/9)'s
+  seven acceptance criteria are adopted as fixture-based tests.
+
 ## [0.5.0] - 2026-07-19
 
 ### Changed

@@ -17,6 +17,8 @@ config:
 ignores:
   - "node_modules/**"
   - ".local/**"
+  # Playwright (a core dep since M2) ships markdown inside the venv.
+  - ".venv/**"
   - ".afi/**"
   - ".teken/**"
   # Vendored skills are cited verbatim from guildmaster — do not reformat them.

@@ -9,10 +9,15 @@ Two things this prompt must keep right, because agents act on it directly:
   script ``[project.scripts]`` actually binds. ``webglass-cli`` is the
   distribution name and is *not* an invocable binary; printing it in a command
   map sends an agent straight to "command not found".
-* **The pre-implementation status.** Both the text body and the JSON payload
-  (``status`` / ``status_detail``, and a parenthetical in ``purpose``) flag that
-  the web operation surface is specified but not built, so a JSON consumer that
-  reads only ``purpose`` cannot infer capabilities that do not exist.
+* **The backend-honest status.** Both the text body and the JSON payload
+  (``status`` / ``status_detail``, and a parenthetical in ``purpose``) say
+  exactly which capability is live. As of build plan t13 the browser backend
+  is real and on by default, so ``page``/``action`` observe real pages;
+  ``search`` needs an API key before it can report anything but
+  ``backend_unavailable``; and the exploration/evidence/memory/policy/
+  operation nouns are not built. A JSON consumer that reads only ``purpose``
+  must not infer a capability that does not exist yet — nor be told a
+  capability is missing when it ships.
 
 Keep both in sync with the ``explain`` root entry in
 :mod:`webglass.explain.catalog`.
@@ -43,30 +48,45 @@ thin Playwright wrapper, not a generic scraper, and not a fact checker.
 
 Status
 ------
-Pre-implementation. The web operation surface (search, page, action, session,
-exploration, evidence, memory, policy, operation) is specified but not built —
-see https://github.com/agentculture/webglass-cli/issues/1. What ships today is
-the agent-first introspection CLI below, plus the contracts every future verb
-registers onto.
+The M0-M2 surface is real and shipped (see
+https://github.com/agentculture/webglass-cli/issues/1): `page` and `action`
+drive a real headless Chromium by default, `session` records survive between
+one-shot invocations, and every verb returns the same structured
+WebOperationResult the library API returns. `search` needs
+$WEBGLASS_BRAVE_API_KEY; without it, it reports a structured
+`backend_unavailable` result, as do all web verbs under
+WEBGLASS_BROWSER_BACKEND=none. Loopback and private-network targets stay
+denied unless a --policy-profile declares them. The exploration, evidence,
+memory, policy, and operation nouns — and any remote action beyond
+`action press`'s preview/declared-test-profile execute — are not built yet;
+see https://github.com/agentculture/webglass-cli/issues/8 for that work.
 
 Commands
 --------
-  webglass whoami             Identity from culture.yaml.
-  webglass learn              This self-teaching prompt.
-  webglass explain <path>...  Markdown docs for any noun/verb path.
-  webglass overview           Descriptive snapshot of the agent.
-  webglass doctor             Check the agent-identity invariants.
-  webglass cli overview       Describe the CLI surface itself.
+  webglass whoami               Identity from culture.yaml.
+  webglass learn                This self-teaching prompt.
+  webglass explain <path>...    Markdown docs for any noun/verb path.
+  webglass overview             Descriptive snapshot of the agent.
+  webglass doctor               Check the agent-identity invariants.
+  webglass cli overview         Describe the CLI surface itself.
+  webglass search <query>       Run a search operation (needs a backend).
+  webglass page overview        Page verbs: open/read/inspect/extract/links/screenshot.
+  webglass action overview      Action verbs: follow/press.
+  webglass session overview     Session verbs: create/list/show/close/clean.
 
 Machine-readable output
 -----------------------
 Every command supports --json. Errors in JSON mode emit
 {"code", "message", "remediation"} to stderr. Stdout and stderr never mix.
+Web-operation verbs (search/page/action/session) always carry their full
+WebOperationResult on stdout in --json mode, success or failure — see
+`webglass explain page` for that contract.
 
 Exit-code policy
 ----------------
-  0 success
-  1 user-input error (bad flag, bad path, missing arg)
+  0 success (including a web-operation 'previewed' result)
+  1 user-input error, or a web-operation 'denied'/'blocked'/'failed'/
+    'timed_out'/'cancelled' result
   2 environment / setup error
   3+ reserved
 
@@ -83,14 +103,25 @@ def _as_json_payload() -> dict[str, object]:
         "version": __version__,
         "purpose": (
             "The guarded web operations and evidence plane for AI agents "
-            "(pre-implementation — the web operation surface is specified but not built)."
+            "(the M0-M2 surface is real and shipped — search/page/action/session drive "
+            "a real headless Chromium by default; evidence, exploration, memory, and "
+            "the Colleague library provider are M3+, tracked in issue #8)."
         ),
-        "status": "pre-implementation",
+        "status": "m0-m2-shipped",
         "status_detail": (
-            "The web operation surface (search, page, action, session, exploration, "
-            "evidence, memory, policy, operation) is specified but not built. The "
-            "commands listed here are the complete implemented surface. See "
-            "https://github.com/agentculture/webglass-cli/issues/1"
+            "The M0-M2 surface is real and shipped: page and action drive a real "
+            "headless Chromium by default, session records survive between one-shot "
+            "invocations, and every verb returns the same structured "
+            "WebOperationResult the library API returns. search needs "
+            "$WEBGLASS_BRAVE_API_KEY; without it, it reports a structured "
+            "'backend_unavailable' result, as does every web verb under "
+            "WEBGLASS_BROWSER_BACKEND=none. Loopback and private-network targets stay "
+            "denied unless a --policy-profile declares them. The exploration, "
+            "evidence, memory, policy, and operation nouns are not built yet, and no "
+            "remote action beyond action press's preview/declared-test-profile execute "
+            "exists. See https://github.com/agentculture/webglass-cli/issues/8 for "
+            "that work, and https://github.com/agentculture/webglass-cli/issues/1 for "
+            "the full target architecture."
         ),
         "commands": [
             {"path": ["whoami"], "summary": "Identity probe from culture.yaml."},
@@ -99,10 +130,26 @@ def _as_json_payload() -> dict[str, object]:
             {"path": ["overview"], "summary": "Descriptive snapshot of the agent."},
             {"path": ["doctor"], "summary": "Check the agent-identity invariants."},
             {"path": ["cli", "overview"], "summary": "Describe the CLI surface."},
+            {
+                "path": ["search"],
+                "summary": "Run a search operation (needs a search backend).",
+            },
+            {
+                "path": ["page", "overview"],
+                "summary": "Page verbs: open/read/inspect/extract/links/screenshot.",
+            },
+            {"path": ["action", "overview"], "summary": "Action verbs: follow/press."},
+            {
+                "path": ["session", "overview"],
+                "summary": "Session verbs: create/list/show/close/clean.",
+            },
         ],
         "exit_codes": {
-            "0": "success",
-            "1": "user-input error",
+            "0": "success (including a web-operation 'previewed' result)",
+            "1": (
+                "user-input error, or a web-operation 'denied'/'blocked'/'failed'/"
+                "'timed_out'/'cancelled' result"
+            ),
             "2": "environment/setup error",
         },
         "json_support": True,
