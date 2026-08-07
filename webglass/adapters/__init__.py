@@ -20,7 +20,10 @@ re-exported:
   :class:`webglass.sessions.SessionStore`. It is re-exported below as
   ``BrowserSessionStore`` so callers of this package never need to know it
   actually lives in a sibling module — but the protocol itself is defined
-  exactly once, in ``sessions.py``.
+  exactly once, in ``sessions.py``. Its on-disk *implementation* does live
+  here (:mod:`webglass.adapters.session_store`), because that is what an
+  adapter is: the part that touches the outside world — files, permissions,
+  locks, and browser processes.
 - **Web policy** already has a home too: :class:`webglass.policy.WebPolicyEvaluator`.
   ``fetch.py`` and ``browser.py`` *consume* an evaluator (an optional
   constructor argument that re-checks every redirect hop) — this package
@@ -56,10 +59,14 @@ from .browser import (
 from .clock import Clock, FixedClock, IdProvider, SequentialIds
 from .fetch import FakeFetchBackend, FakeFetchRoute, FetchBackend, FetchResult
 from .search import FakeSearchProvider, SearchProvider, SearchResult, SearchResultSet
+from .session_store import FileSessionRecord, FileSessionStore
 
 __all__ = [
     # Re-exported, not redefined.
     "BrowserSessionStore",
+    # Sessions on disk (the protocol's cross-invocation implementation).
+    "FileSessionRecord",
+    "FileSessionStore",
     # Determinism seams.
     "Clock",
     "FixedClock",

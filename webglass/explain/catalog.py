@@ -391,10 +391,12 @@ Bare `webglass session` (no sub-verb) prints `session overview`.
 
 ## Status
 
-M1 sessions live in an in-memory, per-process store (see `webglass explain
-session overview`): they survive across `webglass` invocations within the
-same process, but not across separate CLI subprocesses yet — cross-invocation
-persistence lands at build plan task t12.
+Sessions persist on disk (one 0600 record per session in a 0700 directory
+under `$WEBGLASS_STATE_DIR`, else `$XDG_STATE_HOME/webglass`, else
+`~/.local/state/webglass`), so a session created by one CLI process is usable
+by the next. `session create` launches a real detached browser only when a
+browser backend is configured (`WEBGLASS_BROWSER_BACKEND=playwright`);
+making that the default belongs to the page/action verbs (build plan t13).
 
 ## Usage
 
@@ -409,9 +411,15 @@ persistence lands at build plan task t12.
 _SESSION_CREATE = """\
 # webglass session create
 
-Create a new browser session record. The record's `endpoint_ref` (the
-connect endpoint) is secret-equivalent and never appears in JSON output, logs,
-or evidence — only `to_public_dict()`'s redacted shape is ever rendered.
+Create a new browser session record, and — when a browser backend is
+configured — launch the detached browser it names. The record's
+`endpoint_ref` (the connect endpoint) is secret-equivalent: it is stored in a
+0600 file and never appears in JSON output, logs, or evidence — only
+`to_public_dict()`'s redacted shape is ever rendered.
+
+The sandbox posture is on the record: a session whose browser was launched
+with the explicit `WEBGLASS_ALLOW_UNSANDBOXED=1` opt-in reports
+`sandboxed: false` and a sandbox-disabled diagnostic on every render.
 
 ## Usage
 
@@ -445,8 +453,10 @@ Show one session's public record (its redacted shape — no connect endpoint).
 _SESSION_CLOSE = """\
 # webglass session close <session-id>
 
-Close a session. Touches no evidence record and no exploration edge — the
-four state kinds (CLAUDE.md "Target architecture" section 2) stay separate.
+Close a session and stop its browser: the process is terminated and its
+profile directory removed, so a closed session leaves nothing running.
+Touches no evidence record and no exploration edge — the four state kinds
+(CLAUDE.md "Target architecture" section 2) stay separate.
 
 ## Usage
 
@@ -457,9 +467,16 @@ four state kinds (CLAUDE.md "Target architecture" section 2) stay separate.
 _SESSION_CLEAN = """\
 # webglass session clean
 
-Reap this store's expired sessions (past their `expires_at`). Only this
-caller's reaped sessions are listed in the result; a warning notes if other
-callers' sessions were also reaped from a shared store.
+Reap this store's expired sessions (past their `expires_at`) *and* their
+browser processes: each reaped session's browser is terminated by its stored
+pid and its profile directory removed, so a crashed caller leaves no orphan
+browser past expiry. An already-dead process is not an error — the result
+reports `browser_reaped` and `browser_was_running` per session. Expired
+leases on still-live sessions are released, and long-dead or unreadable
+record files are purged.
+
+Only this caller's reaped sessions are listed in the result; a warning notes
+if other callers' sessions were also reaped from a shared store.
 
 ## Usage
 

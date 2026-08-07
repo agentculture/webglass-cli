@@ -11,19 +11,42 @@ module (``search.py``, ``page.py``, ``action.py``, ``session.py``) calls — so
 no ``_commands`` module ever imports an adapter, constructs a
 ``WebGlassService`` directly, or duplicates the exit-code/output mapping.
 
-M1 default posture
--------------------
+Default posture
+----------------
 :func:`build_service` wires a real :class:`Clock`/:class:`IdProvider` (this
-module's :class:`SystemClock`/:class:`UuidIds`) and a process-local
-``InMemorySessionStore``, and deliberately injects **no** search/browser/
-artifact backend. That is not an oversight:
+module's :class:`SystemClock`/:class:`UuidIds`) and a
+:class:`~webglass.adapters.session_store.FileSessionStore`, and deliberately
+injects **no** search or artifact backend. That is not an oversight:
 :class:`~webglass.service.WebGlassService` already turns a missing adapter
 into a structured ``backend_unavailable`` result rather than an
 ``AttributeError`` or a silent substitution, so ``webglass search``/``page``/
 ``action`` verbs round-trip through the full CLI/JSON/exit-code contract
 today — they just correctly report that the backend capability does not
-exist at this milestone. Real backends land at t13 (browser observation
-verbs) and t15 (search provider); this module is the seam they wire through.
+exist at this milestone. The search provider lands at t15; this module is the
+seam it wires through.
+
+The browser backend is different: it exists (t11's Playwright adapter) and is
+wired here, but behind a **staging switch**, :data:`BROWSER_BACKEND_ENV`.
+With ``WEBGLASS_BROWSER_BACKEND=playwright`` a ``session create`` launches a
+real detached Chromium and every later invocation reattaches to it through
+the file store's endpoint; unset, ``session create`` records a session
+without a browser and the page/action verbs keep reporting
+``backend_unavailable``. The switch exists because turning the browser on by
+default is a *verb-behavior* change — ``page open`` would start contacting
+the network — and that belongs to t13, which owns the page and action verbs
+and flips this default. t12 owns the wiring underneath it, so t13 changes one
+default rather than building a session lifecycle.
+
+Sessions across invocations
+----------------------------
+The store is on disk, under ``$WEBGLASS_STATE_DIR`` /
+``$XDG_STATE_HOME/webglass`` / ``~/.local/state/webglass`` (see
+:mod:`webglass.adapters.session_store`), so ``session create`` in one
+``webglass`` process is visible to ``session show`` in the next — the M2
+cross-invocation session promise (spec claim c29). A fresh store object is
+built per :func:`build_service` call because it holds no state of its own:
+every fact lives in the files, which is exactly what makes two processes
+agree.
 
 The seam, precisely
 --------------------
@@ -44,39 +67,55 @@ function-local literal, so:
 minted per invocation: ``WebGlassService`` scopes session visibility
 (``session list``) and lease-conflict resolution by ``(caller, task)``, so a
 CLI that minted a fresh task id on every invocation would make ``session
-create`` in one process-local call invisible to (or lease-conflicting with)
-``session show``/``page open --session-id ...`` in the next — breaking
-exactly the within-process, cross-invocation session flow this milestone
-promises (build plan t10's design guidance). A real multi-caller/multi-task
-CLI identity is deferred to t12's on-disk ``FileSessionStore``.
+create`` in one call invisible to (or lease-conflicting with) ``session
+show``/``page open --session-id ...`` in the next — breaking exactly the
+cross-invocation session flow this milestone promises (build plan t10's
+design guidance). That is now load-bearing across *processes* too: the fixed
+holder string is why a second CLI invocation renews its own lease instead of
+being refused by the first one's. A real multi-caller/multi-task CLI identity
+(and with it, genuine per-caller session isolation) is a later decision.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from webglass.adapters.browser import BrowserBackend
 from webglass.adapters.clock import Clock, IdProvider  # noqa: F401 - re-exported for callers
-from webglass.cli._errors import EXIT_SUCCESS, EXIT_USER_ERROR, CliError
+from webglass.adapters.session_store import (
+    FileSessionStore,
+    SessionLauncher,
+    default_sessions_dir,
+    make_playwright_launcher,
+)
+from webglass.cli._errors import EXIT_ENV_ERROR, EXIT_SUCCESS, EXIT_USER_ERROR, CliError
 from webglass.cli._output import emit_error, emit_result
 from webglass.context import WebContext
 from webglass.effects import OperationKind
 from webglass.operations import ApplyState, CallerContext, OperationTarget, WebOperation
 from webglass.results import LifecycleState, OperationError, WebOperationResult
 from webglass.service import WebGlassService
-from webglass.sessions import InMemorySessionStore
 
 __all__ = [
+    "BROWSER_BACKEND_ENV",
+    "BROWSER_BACKENDS",
     "SystemClock",
     "UuidIds",
+    "browser_backend_name",
+    "build_browser_backend",
     "build_context",
     "build_operation",
     "build_service",
+    "build_session_store",
     "render_operation_result",
+    "reset_browser_backends",
 ]
 
 
@@ -94,15 +133,19 @@ class UuidIds:
         return f"{kind}-{uuid.uuid4().hex}"
 
 
-#: Session state shared by every ``WebGlassService`` this factory builds
-#: within one CLI process (module import is process-scoped) — the M1 answer
-#: to "does `session create` in one CLI invocation stay visible to the next
-#: `session show`/`session close`". Cross-*process* persistence is t12's
-#: on-disk ``FileSessionStore``.
-_SESSIONS: InMemorySessionStore = InMemorySessionStore()
+#: Selects this process's browser backend: ``playwright`` or ``none``
+#: (the default). See the module docstring — this is a staging switch t13
+#: flips, not a permanent knob.
+BROWSER_BACKEND_ENV = "WEBGLASS_BROWSER_BACKEND"
+
+#: Every value :data:`BROWSER_BACKEND_ENV` accepts. An unrecognized value is a
+#: structured environment error (exit 2), never a silent fallback to "none":
+#: a caller who asked for a browser and got a no-op would be told their page
+#: verbs are unsupported when in fact their spelling was wrong.
+BROWSER_BACKENDS = ("none", "playwright")
 
 #: Fixed caller/task/evidence-namespace identity for every CLI-issued
-#: operation at M1 — see the module docstring for why these are constants.
+#: operation — see the module docstring for why these are constants.
 _DEFAULT_CALLER = "cli"
 _DEFAULT_TASK = "cli"
 _DEFAULT_EVIDENCE_NAMESPACE = "cli"
@@ -111,10 +154,16 @@ _DEFAULT_POLICY_PROFILE_REF = "built-in-default"
 #: The default adapter set :func:`build_service` merges caller overrides
 #: over. Deliberately module-level (not a function-local literal) — see the
 #: module docstring's "the seam, precisely" section.
+#: ``sessions`` and ``browser`` are present but ``None``: they are built per
+#: invocation by :func:`build_session_store` / :func:`build_browser_backend`
+#: (both read the environment, which a module-level literal frozen at import
+#: time could not). Rebinding either entry still overrides that construction
+#: — the seam is unchanged, only its default is computed rather than fixed.
 _DEFAULT_SERVICE_KWARGS: dict[str, Any] = {
     "clock": SystemClock(),
     "ids": UuidIds(),
-    "sessions": _SESSIONS,
+    "sessions": None,
+    "browser": None,
 }
 
 #: The default ``WebContext`` field set :func:`build_context` merges caller
@@ -129,6 +178,106 @@ _DEFAULT_CONTEXT_KWARGS: dict[str, Any] = {
 }
 
 
+def browser_backend_name(environ: Mapping[str, str] | None = None) -> str:
+    """Which browser backend this process is configured for.
+
+    :raises CliError: (exit 2, environment error) on an unrecognized value.
+    """
+    env = os.environ if environ is None else environ
+    name = env.get(BROWSER_BACKEND_ENV, "").strip().lower() or "none"
+    if name not in BROWSER_BACKENDS:
+        raise CliError(
+            code=EXIT_ENV_ERROR,
+            message=f"{BROWSER_BACKEND_ENV}={name!r} is not a known browser backend",
+            remediation=f"set it to one of: {', '.join(BROWSER_BACKENDS)} (or leave it unset)",
+        )
+    return name
+
+
+def build_session_store(environ: Mapping[str, str] | None = None) -> FileSessionStore:
+    """The on-disk session store this invocation reads and writes.
+
+    Given a browser backend, the store also gets its *launcher*, so ``session
+    create`` starts the detached browser whose endpoint later invocations
+    reattach to. With no browser backend it gets none, and ``session create``
+    records a session without starting anything — the posture the default
+    test suite and every browser-less caller run in.
+    """
+    launcher: SessionLauncher | None = None
+    if browser_backend_name(environ) == "playwright":
+        launcher = make_playwright_launcher()
+    return FileSessionStore(default_sessions_dir(environ), launcher=launcher)
+
+
+#: One browser backend per process per store directory — see
+#: :func:`build_browser_backend` on why this cache is a correctness
+#: requirement rather than an optimization.
+_BACKEND_CACHE: dict[Path, BrowserBackend] = {}
+
+
+def reset_browser_backends() -> None:
+    """Drop the cached backends (test helper / long-lived-process reset).
+
+    Does **not** disconnect them: dropping a reference is not the same as
+    tearing down a live CDP connection, and a caller that wants a fresh
+    backend for a different store must not thereby close the previous one's
+    pages.
+    """
+    _BACKEND_CACHE.clear()
+
+
+def build_browser_backend(
+    store: FileSessionStore, environ: Mapping[str, str] | None = None
+) -> BrowserBackend | None:
+    """The browser backend for this process, or ``None`` if not configured.
+
+    The backend resolves each session id to a connect endpoint through
+    ``store.endpoint_for`` — the callable seam
+    :class:`~webglass.adapters.playwright.PlaywrightBrowserBackend` documents
+    for exactly this. That single line is what makes a browser session
+    reattachable from a process that never launched it: the endpoint comes out
+    of the file store, not out of this process's memory.
+
+    **Per process, not per operation.** Playwright's sync API refuses to start
+    a second driver inside a thread that already has one running ("It looks
+    like you are using Playwright Sync API inside the asyncio loop"), so a
+    process performing two web operations must reuse one backend — a fresh
+    instance per :func:`build_service` call would make the *second* operation
+    fail with a bare backend error. The cache is keyed by the store's
+    directory, since that is what determines which endpoints resolve; the
+    backend's own connections stay lazy, so an unused backend costs nothing.
+
+    Playwright is imported lazily so the browser-less posture never pays for
+    (or requires) the import.
+    """
+    if browser_backend_name(environ) != "playwright":
+        return None
+    cached = _BACKEND_CACHE.get(store.directory)
+    if cached is not None:
+        return cached
+    from webglass.adapters.playwright import PlaywrightBrowserBackend
+
+    _quiet_asyncio_teardown_chatter()
+    backend = PlaywrightBrowserBackend(store.endpoint_for)
+    _BACKEND_CACHE[store.directory] = backend
+    return backend
+
+
+def _quiet_asyncio_teardown_chatter() -> None:
+    """Keep Playwright's interpreter-exit noise off stderr.
+
+    Playwright's sync API logs ``Task was destroyed but it is pending!`` and a
+    ``TargetClosedError`` traceback through the ``asyncio`` logger when the
+    interpreter tears down (reproducible with no WebGlass code at all — see
+    :mod:`webglass.adapters.playwright`'s module docstring). The CLI's error
+    contract is that *no Python traceback ever reaches stderr*, so the layer
+    that wires the browser in is the layer that has to silence it. Scoped to
+    the ``asyncio`` logger and applied only when a browser is actually wired,
+    so nothing else about this process's logging changes.
+    """
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+
 def build_service(overrides: Mapping[str, Any] | None = None) -> WebGlassService:
     """Construct the ``WebGlassService`` one CLI invocation executes operations through.
 
@@ -136,11 +285,18 @@ def build_service(overrides: Mapping[str, Any] | None = None) -> WebGlassService
     directly) so the adapter set lives in exactly one place. ``overrides``
     replaces individual constructor kwargs (``search=``, ``browser=``,
     ``artifacts=``, ``policy=``, ``clock=``, ``ids=``, ``sessions=``, ...)
-    without the caller needing to know the rest of the default set.
+    without the caller needing to know the rest of the default set — and an
+    override wins over the environment-driven defaults below.
     """
     kwargs: dict[str, Any] = dict(_DEFAULT_SERVICE_KWARGS)
     if overrides:
         kwargs.update(overrides)
+    store = kwargs.get("sessions")
+    if store is None:
+        store = build_session_store()
+        kwargs["sessions"] = store
+    if kwargs.get("browser") is None and isinstance(store, FileSessionStore):
+        kwargs["browser"] = build_browser_backend(store)
     return WebGlassService(**kwargs)
 
 
