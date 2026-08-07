@@ -596,8 +596,9 @@ def test_lease_operations_on_an_unknown_session_raise_like_the_in_memory_store(
 def test_a_duplicate_session_id_is_refused(tmp_path: Path) -> None:
     store = _store(tmp_path)
     _create(store)
+    reopened = _store(tmp_path)
     with pytest.raises(ValueError, match="already exists"):
-        _create(_store(tmp_path))
+        _create(reopened)
 
 
 def test_bump_generation_persists(tmp_path: Path) -> None:
@@ -1361,7 +1362,8 @@ def test_clean_reaps_a_real_expired_browser(browser_state_dir: Path, tmp_path: P
     )
     assert created.returncode == 0, created.stderr
     record = FileSessionStore(browser_state_dir / "sessions").get("reap-me")
-    assert record is not None and record.pid is not None
+    assert record is not None
+    assert record.pid is not None
     assert store_module._is_running(record.pid)
 
     time.sleep(1.2)

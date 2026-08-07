@@ -273,7 +273,8 @@ def test_the_profile_can_come_from_the_environment(tmp_path: Path) -> None:
     evaluator = _factory.build_policy_evaluator(
         None, environ={_factory.POLICY_PROFILE_ENV: str(profile)}
     )
-    assert evaluator is not None and evaluator.evaluate("http://127.0.0.1:8000/").allowed
+    assert evaluator is not None
+    assert evaluator.evaluate("http://127.0.0.1:8000/").allowed
 
 
 @pytest.mark.parametrize(
@@ -884,7 +885,8 @@ def test_the_factory_wires_brave_when_the_key_is_present(
 
     monkeypatch.setenv(WEBGLASS_BRAVE_API_KEY_ENV, "planted-key-do-not-log")
     provider = _factory.build_search_provider()
-    assert provider is not None and provider.provider_id == "brave"
+    assert provider is not None
+    assert provider.provider_id == "brave"
 
     # Drive the whole CLI verb over that provider, through the factory seam.
     service = _service(search=BraveOverFakeTransport(transport))
@@ -936,9 +938,11 @@ def test_an_ephemeral_session_is_created_and_closed_within_the_invocation(
         with _factory.ephemeral_session(service, None) as session_id:
             assert session_id is not None
             record = store.get(session_id)
-            assert record is not None and record.status is SessionStatus.ACTIVE
+            assert record is not None
+            assert record.status is SessionStatus.ACTIVE
         closed = store.get(session_id)
-        assert closed is not None and closed.status is SessionStatus.CLOSED
+        assert closed is not None
+        assert closed.status is SessionStatus.CLOSED
         # "Closed" has to mean the process is gone, not just the record.
         deadline = time.time() + 30
         while time.time() < deadline and store_module._is_running(sleeper.pid):
@@ -968,7 +972,8 @@ def test_an_explicit_session_id_is_never_closed_by_the_ephemeral_wrapper(
     with _factory.ephemeral_session(service, "mine") as session_id:
         assert session_id == "mine"
     record = store.get("mine")
-    assert record is not None and record.status is SessionStatus.ACTIVE
+    assert record is not None
+    assert record.status is SessionStatus.ACTIVE
 
 
 def test_no_browser_means_no_session_is_provisioned_at_all(tmp_path: Path) -> None:
@@ -994,9 +999,13 @@ def test_a_launch_failure_keeps_its_own_remediation(tmp_path: Path) -> None:
 
     store = FileSessionStore(tmp_path / "sessions", launcher=launch)
     service = _service(FakeBrowserBackend({}), sessions=store)
-    with pytest.raises(CliError) as excinfo:
+
+    def _enter_and_never_run() -> None:
         with _factory.ephemeral_session(service, None):
             pytest.fail("the body must never run when the browser could not start")
+
+    with pytest.raises(CliError) as excinfo:
+        _enter_and_never_run()
     assert excinfo.value.code == 2
     assert "usable sandbox" in excinfo.value.message
     assert "AppArmor" in excinfo.value.remediation
@@ -1097,7 +1106,8 @@ def test_live_throwing_page_reports_the_error_text_and_source_location(
     assert len(errors) == 1
     assert "deliberate synchronous throw on load" in errors[0]["text"]
     assert errors[0]["source_url"] == f"{fixture_site}/throw"
-    assert isinstance(errors[0]["line"], int) and errors[0]["line"] > 0
+    assert isinstance(errors[0]["line"], int)
+    assert errors[0]["line"] > 0
 
     lensed = _ok(
         live_env,

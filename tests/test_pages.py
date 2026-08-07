@@ -38,6 +38,7 @@ from webglass.pages import (
     read,
 )
 from webglass.references import (
+    ReferenceSyntaxError,
     RefKind,
     SnapshotRef,
     StaleReferenceError,
@@ -153,8 +154,9 @@ def test_a_snapshot_refuses_to_embed_a_reference_from_another_snapshot() -> None
 
 
 def test_a_block_ref_must_be_of_block_kind() -> None:
-    with pytest.raises(Exception):
-        Block(ref=_ref(RefKind.LINK, 0), kind=BlockKind.PARAGRAPH, text="x", source_order=0)
+    link_ref = _ref(RefKind.LINK, 0)
+    with pytest.raises(ReferenceSyntaxError):
+        Block(ref=link_ref, kind=BlockKind.PARAGRAPH, text="x", source_order=0)
 
 
 # --- resolution -------------------------------------------------------------
@@ -188,8 +190,10 @@ def test_resolving_a_ref_from_an_older_generation_fails_as_stale() -> None:
 
 
 def test_resolving_an_in_scope_but_absent_ref_fails_as_unknown() -> None:
+    snapshot = _snapshot()
+    absent = _ref(RefKind.BLOCK, 99)
     with pytest.raises(UnknownReferenceError):
-        _snapshot().resolve(_ref(RefKind.BLOCK, 99))
+        snapshot.resolve(absent)
 
 
 def test_resolving_an_omitted_block_says_why_it_is_missing() -> None:
@@ -203,14 +207,17 @@ def test_resolving_an_omitted_block_says_why_it_is_missing() -> None:
             ),
         )
     )
+    omitted_ref = _ref(RefKind.BLOCK, 42)
     with pytest.raises(UnknownReferenceError) as excinfo:
-        snapshot.resolve(_ref(RefKind.BLOCK, 42))
+        snapshot.resolve(omitted_ref)
     assert "boilerplate" in str(excinfo.value)
 
 
 def test_asking_for_a_block_with_a_link_ref_is_a_clear_type_failure() -> None:
+    snapshot = _snapshot()
+    link_ref = _ref(RefKind.LINK, 0)
     with pytest.raises(UnknownReferenceError):
-        _snapshot().block(_ref(RefKind.LINK, 0))
+        snapshot.block(link_ref)
 
 
 # --- lens: page_card --------------------------------------------------------
@@ -337,13 +344,17 @@ def test_read_accepts_a_qualified_cursor_string() -> None:
 
 
 def test_read_refuses_a_cursor_from_another_snapshot() -> None:
+    snapshot = _snapshot()
+    foreign_cursor = SnapshotRef(OTHER, 0, RefKind.BLOCK, 0).qualified
     with pytest.raises(StaleReferenceError):
-        _snapshot().read(cursor=SnapshotRef(OTHER, 0, RefKind.BLOCK, 0).qualified)
+        snapshot.read(cursor=foreign_cursor)
 
 
 def test_read_refuses_a_cursor_that_names_no_block_in_this_snapshot() -> None:
+    snapshot = _snapshot()
+    absent_cursor = _ref(RefKind.BLOCK, 99)
     with pytest.raises(UnknownReferenceError):
-        _snapshot().read(cursor=_ref(RefKind.BLOCK, 99))
+        snapshot.read(cursor=absent_cursor)
 
 
 def test_read_honors_a_character_budget() -> None:

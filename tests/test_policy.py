@@ -20,6 +20,8 @@ touches a real network -- the policy core is pure data in, verdict out.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from tests.fixtures.server import PRIVATE_TARGET
@@ -38,7 +40,7 @@ from webglass.policy import (
 PUBLIC_URL = "https://example.com/docs"
 
 
-@pytest.fixture()
+@pytest.fixture
 def default_evaluator() -> WebPolicyEvaluator:
     """An evaluator with no caller-supplied policy: the absent-policy state."""
     return WebPolicyEvaluator()
@@ -79,7 +81,7 @@ def test_verdict_to_dict_is_json_shaped(default_evaluator: WebPolicyEvaluator) -
 
 def test_verdict_is_immutable(default_evaluator: WebPolicyEvaluator) -> None:
     verdict = default_evaluator.evaluate(PUBLIC_URL)
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         verdict.decision = PolicyDecision.DENIED  # type: ignore[misc]
     assert isinstance(verdict.matched_rule_ids, tuple)
 
@@ -368,7 +370,8 @@ def test_evaluate_alone_never_consults_a_chain(default_evaluator: WebPolicyEvalu
     second = default_evaluator.evaluate(PRIVATE_TARGET)
     assert first.allowed is True
     assert second.allowed is False
-    assert first.hop_index is None and second.hop_index is None
+    assert first.hop_index is None
+    assert second.hop_index is None
 
 
 # --------------------------------------------------------------------------
@@ -825,7 +828,7 @@ def test_profile_to_dict_exposes_the_mandatory_denylist() -> None:
 
 def test_profile_is_immutable() -> None:
     profile = WebPolicyProfile.default()
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         profile.name = "hacked"  # type: ignore[misc]
 
 
@@ -872,8 +875,9 @@ def test_with_declared_targets_narrows_a_profile_without_mutating_it() -> None:
 
 
 def test_with_declared_targets_rejects_a_malformed_spec() -> None:
+    profile = WebPolicyProfile.default()
     with pytest.raises(PolicyError):
-        WebPolicyProfile.default().with_declared_targets(["http://localhost:nope"])
+        profile.with_declared_targets(["http://localhost:nope"])
 
 
 def test_declared_target_parse_rejects_a_non_string() -> None:
