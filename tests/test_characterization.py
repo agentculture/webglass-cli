@@ -171,7 +171,8 @@ def test_json_error_shape_is_exactly_code_message_remediation(
     payload = json.loads(capsys.readouterr().err)
     assert set(payload) == {"code", "message", "remediation"}
     assert payload["code"] == EXIT_USER_ERROR
-    assert isinstance(payload["message"], str) and payload["message"]
+    assert isinstance(payload["message"], str)
+    assert payload["message"]
     assert isinstance(payload["remediation"], str)
 
 
