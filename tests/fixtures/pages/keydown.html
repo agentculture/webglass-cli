@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebGlass Fixture: Keydown Logger</title>
+  </head>
+  <body>
+    <h1 data-fixture="keydown">Keydown Logger</h1>
+    <p>
+      Focus this page and press keys: each keydown is appended to
+      <code>window.__webglassKeyLog</code> and mirrored into the
+      <code>#keylog</code> element's text content and
+      <code>data-fixture-state</code> attribute, so a later read (M2) can
+      confirm the exact pressed sequence without re-running any script.
+    </p>
+    <div id="keylog" data-fixture-state="[]" tabindex="0"></div>
+    <script>
+      window.__webglassKeyLog = [];
+      document.addEventListener("keydown", function (event) {
+        window.__webglassKeyLog.push(event.key);
+        var state = JSON.stringify(window.__webglassKeyLog);
+        var node = document.getElementById("keylog");
+        node.setAttribute("data-fixture-state", state);
+        node.textContent = window.__webglassKeyLog.join(",");
+      });
+    </script>
+  </body>
+</html>
