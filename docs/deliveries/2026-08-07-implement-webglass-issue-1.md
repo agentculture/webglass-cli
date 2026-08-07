@@ -157,8 +157,8 @@ criteria (see Actual Delivery, task by task).
 | Search API keys are redacted from every output and store | high | `tests/test_brave_search.py::TestPlantedKeyRedaction` |
 | All seven issue #9 acceptance criteria hold | high | `tests/test_definition_of_done.py` + `tests/test_verbs_live.py` mappings |
 | The issue #1 §20 definition-of-done holds for the M0–M2 subset, with M3+ items declared deferred | high | `tests/test_definition_of_done.py` (13 items: 9 tested, 4 declared skips naming #8) |
-| The CI `browser-test` job and `example-webapp-test.yml` recipe pass on real GitHub Actions runners | unverified | not yet run on GH infrastructure — first PR CI run will verify (risk r4) |
-| Publishing to (Test)PyPI succeeds with the Playwright core dep | unverified | publish workflow untested with the new dependency set — verified at PR time |
+| The CI `browser-test` job and `example-webapp-test.yml` recipe pass on real GitHub Actions runners (risk r4 retired: the AppArmor sysctl fix works) | high | PR #11 checks: `browser-test` pass (2m20s), `example-webapp-test` pass — runs 31225699652 / 31225699573 |
+| Publishing to TestPyPI succeeds with the Playwright core dep | high | PR #11 `test-publish` pass — run 31225699576 |
 
 ## Remaining Work / Follow-up
 
@@ -166,11 +166,17 @@ criteria (see Actual Delivery, task by task).
   issue #10 (`d1`, needs-follow-up); M3-adjacent design work.
 - M3–M6: evidence store, exploration graphs, Web-memory, Colleague provider,
   guarded interaction/artifact bridge, credential brokering — issue #8.
-- Verify the `browser-test` job's AppArmor sysctl fix and the
-  `example-webapp-test.yml` recipe on real GitHub Actions runners (risk r4) —
-  happens on this branch's PR.
-- Sonar quality gate + Qodo review comments on the PR — handled in the cicd
-  leg following this summary.
+- ~~Verify the `browser-test` job on real GitHub runners~~ — done on PR #11
+  (risk r4 retired; see Delivery Claims).
+- ~~Sonar quality gate + Qodo review~~ — done in the cicd leg: SonarCloud
+  reached 0 open PR issues with the gate passing (128 findings fixed across
+  three rounds); Qodo's 4 inline threads all resolved (3 fixed in `6a18f6c` —
+  profile-dir 0700 enforcement, launch-timeout reap, Brave endpoint
+  validation — 1 pushback: the Playwright-in-core packaging is recorded
+  decision c8).
+- GitGuardian check on PR #11: red only for the two fake redaction sentinels
+  in historical commits (de-patterned at HEAD in `75cf2e1`); needs an
+  operator dashboard dismissal — the only remaining red.
 - Notify colleague on issue #9 once the PR merges (their #387 proof is
   timeline-coupled to M2).
 - Plan risks r1 (NDJSON/event streaming deferred) and r2 (non-Linux platform
