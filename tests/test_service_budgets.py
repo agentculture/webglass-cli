@@ -232,7 +232,8 @@ def test_an_exhausted_request_budget_blocks_before_the_backend_is_touched() -> N
     result = open_page(service, make_context(request_budget=0))
 
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_BUDGET_EXHAUSTED
+    assert result.error is not None
+    assert result.error.code == ERROR_BUDGET_EXHAUSTED
     assert "the request was not issued" in result.error.message
     assert browser.opened == []
     assert result.degraded_evidence is False
@@ -248,7 +249,8 @@ def test_the_request_budget_is_consumed_across_operations() -> None:
 
     assert first.lifecycle_state is LifecycleState.SUCCEEDED
     assert second.lifecycle_state is LifecycleState.BLOCKED
-    assert second.error is not None and second.error.code == ERROR_BUDGET_EXHAUSTED
+    assert second.error is not None
+    assert second.error.code == ERROR_BUDGET_EXHAUSTED
     assert len(browser.opened) == 1
 
 
@@ -257,7 +259,8 @@ def test_an_exhausted_token_budget_blocks_but_preserves_the_observation() -> Non
     result = open_page(service, make_context(token_budget=1))
 
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_BUDGET_EXHAUSTED
+    assert result.error is not None
+    assert result.error.code == ERROR_BUDGET_EXHAUSTED
     assert "estimated_tokens" in result.error.message
     assert TOKEN_ESTIMATE_METHOD in result.error.remediation
     # Partial evidence: the page really was fetched, so it is reported.
@@ -272,7 +275,8 @@ def test_an_exhausted_byte_budget_blocks_with_the_bytes_recorded() -> None:
     result = open_page(service, context)
 
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_BUDGET_EXHAUSTED
+    assert result.error is not None
+    assert result.error.code == ERROR_BUDGET_EXHAUSTED
     assert "transferred_bytes" in result.error.message
     assert service.ledger_for(context).spend.transferred_bytes > 10
 
@@ -283,7 +287,8 @@ def test_an_exhausted_browser_time_budget_blocks() -> None:
     result = open_page(service, make_context(time_budget_seconds=1.0))
 
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_BUDGET_EXHAUSTED
+    assert result.error is not None
+    assert result.error.code == ERROR_BUDGET_EXHAUSTED
     assert "browser_seconds" in result.error.message
 
 
@@ -297,7 +302,8 @@ def test_an_exhausted_artifact_budget_blocks_after_the_artifact_is_stored() -> N
     )
 
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_BUDGET_EXHAUSTED
+    assert result.error is not None
+    assert result.error.code == ERROR_BUDGET_EXHAUSTED
     assert "artifact_bytes" in result.error.message
     # The artifact was really stored, so its reference is still reported.
     assert result.content.trusted["artifact"]["size_bytes"] > 1
@@ -312,7 +318,8 @@ def test_budget_exhaustion_is_never_raised_at_the_caller() -> None:
     ):
         result = service.execute(make_operation(kind, **kwargs), context)
         assert result.lifecycle_state is LifecycleState.BLOCKED
-        assert result.error is not None and result.error.code == ERROR_BUDGET_EXHAUSTED
+        assert result.error is not None
+        assert result.error.code == ERROR_BUDGET_EXHAUSTED
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +333,8 @@ def test_a_slow_navigation_times_out_with_its_partial_evidence() -> None:
     result = open_page(service, make_context(), limits=ResourceLimits(timeout_seconds=1.0))
 
     assert result.lifecycle_state is LifecycleState.TIMED_OUT
-    assert result.error is not None and result.error.code == ERROR_TIMED_OUT
+    assert result.error is not None
+    assert result.error.code == ERROR_TIMED_OUT
     assert "1.0s timeout" in result.error.message
     # The hop that did happen is preserved rather than discarded.
     assert [hop.requested_url for hop in result.navigation_history] == [HOME_URL]
@@ -375,7 +383,8 @@ def test_cancelling_during_a_navigation_yields_cancelled_with_partial_evidence()
     )
 
     assert result.lifecycle_state is LifecycleState.CANCELLED
-    assert result.error is not None and result.error.code == ERROR_CANCELLED
+    assert result.error is not None
+    assert result.error.code == ERROR_CANCELLED
     assert [hop.requested_url for hop in result.navigation_history] == [HOME_URL]
     assert result.degraded_evidence is True
     # The budget report still renders: a cancelled operation still cost something.
