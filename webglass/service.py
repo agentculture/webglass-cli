@@ -81,8 +81,11 @@ M1 scope and declared seams
 - **Lens operations do not re-fetch.** ``page.read``/``inspect``/``extract``/
   ``links`` resolve ``target.page_ref`` against an in-process
   :class:`SnapshotRegistry`. Supplying a ``target.url`` instead is an explicit
-  open-then-lens request, charged as such; there is no hidden re-fetch behind a
-  snapshot reference.
+  open-then-lens request, charged as such; supplying only a ``session_id`` is
+  an explicit *live re-read* of that session's current page, which navigates
+  nothing (see :meth:`WebGlassService._live_entry`). There is no hidden
+  re-fetch behind a snapshot reference, and no hidden navigation behind a live
+  read.
 """
 
 from __future__ import annotations
@@ -92,6 +95,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
@@ -102,7 +106,7 @@ from webglass.adapters.fetch import FetchBackend
 from webglass.adapters.search import SearchProvider
 from webglass.context import WebContext
 from webglass.effects import EffectClass, OperationKind
-from webglass.extraction import extract_page
+from webglass.extraction import SelectorSyntaxError, extract_page, extract_selector
 from webglass.operations import ApplyState, CacheMode, WebOperation
 from webglass.pages import TOKEN_ESTIMATE_METHOD, Block, PageSnapshot, ReadBudget, estimate_tokens
 from webglass.policy import PolicyDecision
@@ -203,6 +207,15 @@ ERROR_APPLY_UNAVAILABLE = "remote_action_apply_unavailable"
 ERROR_RESPONSE_TOO_LARGE = "response_too_large"
 #: The navigation chain exceeded ``ResourceLimits.max_redirects``.
 ERROR_REDIRECT_LIMIT = "redirect_limit_exceeded"
+#: The backend reached the target but the navigation itself never completed —
+#: connection refused, DNS failure, TLS failure, or a navigation timeout. A
+#: *transport* failure, distinct from a policy denial (the target was allowed)
+#: and from a backend bug (the adapter behaved correctly). WebGlass never
+#: starts or supervises an app under test, so this is the caller's server to
+#: check (spec honesty h33).
+ERROR_NAVIGATION_FAILED = "navigation_failed"
+#: ``page.screenshot --out`` could not write the PNG at the caller's path.
+ERROR_ARTIFACT_WRITE_FAILED = "artifact_write_failed"
 
 #: Every code this service can put on a result. Callers (and the CLI's own error
 #: mapping at t10) may switch on these; a code absent from this set is a bug,
@@ -230,6 +243,8 @@ ERROR_CODES: frozenset[str] = frozenset(
         ERROR_APPLY_UNAVAILABLE,
         ERROR_RESPONSE_TOO_LARGE,
         ERROR_REDIRECT_LIMIT,
+        ERROR_NAVIGATION_FAILED,
+        ERROR_ARTIFACT_WRITE_FAILED,
     }
 )
 
@@ -483,6 +498,16 @@ class SnapshotEntry:
     --lens console`` must be able to report them without re-opening the page.
     Both are *untrusted source material* and are only ever routed into
     ``content.untrusted``.
+
+    ``html`` is the raw document the observation was extracted from, retained
+    for exactly one reason: selector-scoped extraction
+    (:func:`webglass.extraction.extract_selector`) reads elements the readable
+    pipeline deliberately drops — a ``<script type="application/json">`` state
+    node is the motivating case (issue #9 item 3). It is *untrusted source
+    material*, never rendered wholesale into a result; only the selector's own
+    matches are. Retention stays bounded by
+    :data:`DEFAULT_SNAPSHOT_RETENTION` entries, each already capped by the
+    operation's ``limits.max_response_bytes``.
     """
 
     snapshot: PageSnapshot
@@ -491,6 +516,7 @@ class SnapshotEntry:
     console_messages: tuple[ConsoleMessage, ...] = ()
     page_errors: tuple[PageError, ...] = ()
     navigation_history: tuple[NavigationHop, ...] = ()
+    html: str = ""
 
 
 class SnapshotRegistry:
@@ -1393,9 +1419,50 @@ class WebGlassService:
                 ),
             )
 
+        self._check_reachable(run, opened, url)
         self._check_navigation(run, url, opened.redirect_chain)
         self._check_response_size(run, opened)
         self._record_snapshot(run, ledger, opened, session_id, url)
+
+    #: Prefix a backend stamps on the diagnostic for a navigation that never
+    #: completed (see ``PlaywrightBrowserBackend.open``). Matched as a *prefix*
+    #: so the reason text stays free-form.
+    _NAVIGATION_FAILED_PREFIX = "navigation-failed:"
+
+    def _check_reachable(self, run: _Run, opened: BrowserOpenResult, url: str) -> None:
+        """Turn "the browser could not reach it" into a structured result.
+
+        The adapter never raises for an ordinary web failure — a refused
+        connection, an unresolvable host, or a navigation timeout all come back
+        as a result with no status and no document. Letting that through as a
+        *succeeded* observation of an empty page would be the worst possible
+        answer for the CI/app-under-test caller this milestone serves: their
+        server is simply not up, and the honest report says so and says whose
+        job it is to fix.
+
+        WebGlass never starts, stops, or supervises the app under test (spec
+        honesty h33 / scope boundary) — hence the remediation's framing.
+        """
+        diagnostics = tuple(getattr(opened, "diagnostics", ()) or ())
+        reasons = [d for d in diagnostics if d.startswith(self._NAVIGATION_FAILED_PREFIX)]
+        if not reasons:
+            return
+        run.degraded = run.has_evidence()
+        detail = _sanitize(reasons[0][len(self._NAVIGATION_FAILED_PREFIX) :].strip())
+        raise _Halt(
+            LifecycleState.FAILED,
+            OperationError(
+                code=ERROR_NAVIGATION_FAILED,
+                message=f"the browser could not load {_sanitize(url, 200)}: {detail}",
+                remediation=(
+                    "check that the server for this target is running and reachable, and "
+                    "that the host and port are the ones you meant — WebGlass never "
+                    "starts, stops, or supervises the app under test; that process "
+                    "belongs to you. If the target is a local app under test, also "
+                    "declare its origin in the effective policy profile."
+                ),
+            ),
+        )
 
     def _check_response_size(self, run: _Run, opened: BrowserOpenResult) -> None:
         limit = run.operation.limits.max_response_bytes
@@ -1438,6 +1505,7 @@ class WebGlassService:
             console_messages=opened.console_messages,
             page_errors=opened.page_errors,
             navigation_history=opened.redirect_chain,
+            html=opened.html,
         )
         run.entry = entry
         if run.operation.cache_mode is CacheMode.NO_STORE:
@@ -1499,11 +1567,21 @@ class WebGlassService:
     ) -> SnapshotEntry:
         """Resolve the snapshot a lens projects.
 
-        ``target.page_ref`` projects a retained snapshot with no network access
-        at all. ``target.url`` is an explicit "open, then lens" request: it opens
-        (charging a request, applying policy) and then projects. There is no
-        third path — in particular, a *stale* page_ref never quietly turns into a
-        re-fetch.
+        Three explicit paths, tried in this order, and never a fourth:
+
+        ``target.page_ref``
+            Project a retained snapshot with no network access at all. In
+            particular a *stale* page_ref never quietly turns into a re-fetch.
+        ``target.url``
+            An explicit "open, then lens" request: it navigates (charging a
+            request, applying policy) and then projects.
+        ``operation.session_id`` (and neither of the above)
+            Re-read the session's *live* page without navigating — see
+            :meth:`_live_entry`.
+
+        The ordering matters: an explicit reference or URL always wins over the
+        live page, so "lens this exact observation" can never be reinterpreted
+        as "lens whatever that session happens to be showing now".
         """
         if run.operation.target.page_ref:
             return self._entry(run, run.operation.target.page_ref)
@@ -1511,7 +1589,90 @@ class WebGlassService:
             self._open(run, ledger, cancel, deadline, url=run.operation.target.url)
             if run.entry is not None:
                 return run.entry
+        if run.operation.session_id:
+            return self._live_entry(run, ledger, cancel, deadline)
         return self._entry(run, self._require_page_ref(run))
+
+    def _live_entry(
+        self,
+        run: _Run,
+        ledger: BudgetLedger,
+        cancel: CancellationToken | threading.Event | None,
+        deadline: float | None,
+    ) -> SnapshotEntry:
+        """Observe a session's current page *without navigating it*.
+
+        This is what makes a one-shot CLI able to see what a previous
+        invocation's ``action press`` (or ``page open``) actually did: the
+        retained :class:`SnapshotRegistry` is process-local, and re-opening the
+        URL would destroy the very in-memory page state the observation is
+        about. So the backend is asked for the live DOM instead, and a fresh
+        snapshot (with fresh, correctly-scoped references) is minted from it.
+
+        Two properties are deliberately preserved:
+
+        * **The live URL is policy-checked.** No request is issued here, but the
+          page may have navigated itself since it was opened — a script can move
+          a session to a private-network or metadata target. Re-evaluating the
+          *current* URL is what stops a lens from reading a page policy would
+          never have opened.
+        * **A backend that cannot do this says so.** Live re-read is beyond the
+          :class:`~webglass.adapters.browser.BrowserBackend` protocol (launch
+          and connect deliberately are too), so it is duck-typed and its
+          absence is a structured ``backend_unavailable`` — never a silent
+          fallback to a navigation, which would be a semantically different
+          operation.
+        """
+        browser: BrowserBackend = self._require(self.browser, "browser backend", "browser")
+        run.backend = self._backend_label(browser)
+        session_id = str(run.operation.session_id)
+        self._require_session(run, session_id, lease=True)
+        run.trusted["session"] = {"session_id": session_id, "ephemeral": False, "live_read": True}
+
+        reader = getattr(browser, "current", None)
+        if not callable(reader):
+            raise _Halt(
+                LifecycleState.FAILED,
+                OperationError(
+                    code=ERROR_BACKEND_UNAVAILABLE,
+                    message=(
+                        f"backend {_sanitize(run.backend, 60)} cannot re-read a live page "
+                        "without navigating"
+                    ),
+                    remediation=(
+                        "pass target.page_ref for a retained snapshot, or target.url to "
+                        "navigate; WebGlass never substitutes a navigation for a live read"
+                    ),
+                ),
+            )
+
+        started = self.clock.now()
+        observed = reader(session_id)
+        elapsed = max(0.0, self.clock.now() - started)
+        run.effect("live-page-read")
+        self._step(run, cancel, deadline)
+        self._charge(run, ledger, BudgetDimension.BROWSER_SECONDS, elapsed)
+
+        self._check_allowed_live_url(run, observed)
+        self._check_response_size(run, observed)
+        self._record_snapshot(run, ledger, observed, session_id, observed.requested_url)
+        if run.entry is None:  # pragma: no cover - _record_snapshot always sets it
+            raise _Halt(
+                LifecycleState.FAILED,
+                OperationError(
+                    code=ERROR_BACKEND_FAILURE,
+                    message="the live page read produced no snapshot",
+                    remediation="re-run the operation and report it with this operation id",
+                ),
+            )
+        return run.entry
+
+    def _check_allowed_live_url(self, run: _Run, observed: BrowserOpenResult) -> None:
+        """Policy-check the page a live read is about to project."""
+        url = observed.final_url or observed.requested_url
+        if not url:
+            return
+        self._require_allowed(run, self._evaluate(run, url, hop_index=0))
 
     def _op_page_read(
         self,
@@ -1630,14 +1791,38 @@ class WebGlassService:
     ) -> None:
         """Query-focused block selection — deterministic, and never a summary.
 
-        Blocks are ranked by how many distinct query terms they contain, ties
-        broken by source order, and every returned block keeps its original
-        ``block:<n>`` reference so a citation still points at the source. No
-        model is involved: issue #1 section 6 forbids presenting a synthesized
-        summary as page content.
+        Two modes, chosen by which argument the caller supplied:
+
+        ``selector``
+            Selector-scoped extraction (:meth:`_extract_selector`): return
+            exactly the matching elements' own content, nothing else.
+        ``query``
+            Blocks are ranked by how many distinct query terms they contain,
+            ties broken by source order, and every returned block keeps its
+            original ``block:<n>`` reference so a citation still points at the
+            source.
+
+        No model is involved on either path: issue #1 section 6 forbids
+        presenting a synthesized summary as page content.
         """
         entry = self._lens_entry(run, ledger, cancel, deadline)
         snapshot = entry.snapshot
+        selector = self._arg(run, "selector")
+        if selector:
+            self._extract_selector(run, ledger, entry, str(selector))
+            return
+        if not self._arg(run, "query"):
+            raise _Halt(
+                LifecycleState.FAILED,
+                OperationError(
+                    code=ERROR_INVALID_ARGUMENT,
+                    message="page.extract needs either a query or a selector",
+                    remediation=(
+                        "set normalized_args['query'] to rank readable blocks, or "
+                        "normalized_args['selector'] to return one element's own content"
+                    ),
+                ),
+            )
         query = str(self._arg(run, "query", required=True))
         terms = tuple(sorted({term for term in query.lower().split() if term}))
         max_blocks = run.operation.content_budget.max_blocks
@@ -1679,6 +1864,77 @@ class WebGlassService:
             run, ledger, payload="\n".join(block.text for _score, _order, block in selected)
         )
 
+    def _extract_selector(
+        self, run: _Run, ledger: BudgetLedger, entry: SnapshotEntry, selector: str
+    ) -> None:
+        """Return exactly the selector's own content — not the rest of the page.
+
+        Runs against the *raw retained document* rather than the readable
+        blocks, because the motivating target is precisely an element the
+        readable pipeline drops on purpose: the ``<script
+        type="application/json">`` state node an app under test exposes for
+        machine reading (issue #9 item 3, spec honesty h27). The match text is
+        returned verbatim so a caller can ``json.loads`` it.
+
+        Three states stay distinguishable, none of them collapsed into
+        "nothing came back":
+
+        * the selector matched nothing — a success with zero matches, and an
+          omission record saying the document was searched;
+        * the selector was never understood — a structured
+          ``invalid_argument`` naming the supported forms
+          (:class:`~webglass.extraction.SelectorSyntaxError`);
+        * the document was not retained (``cache_mode=no-store``) — a
+          structured failure, never a silent empty result.
+        """
+        if not entry.html:
+            raise _Halt(
+                LifecycleState.FAILED,
+                OperationError(
+                    code=ERROR_UNKNOWN_SNAPSHOT,
+                    message=(
+                        "selector extraction needs the raw document, and this snapshot "
+                        "was retained without one"
+                    ),
+                    remediation=(
+                        "re-open the page with a cache mode other than 'no-store'; a "
+                        "snapshot recorded without its document cannot be re-scanned"
+                    ),
+                ),
+            )
+        try:
+            matches = extract_selector(entry.html, selector)
+        except SelectorSyntaxError as exc:
+            raise _Halt(
+                LifecycleState.FAILED,
+                OperationError(
+                    code=ERROR_INVALID_ARGUMENT,
+                    message=f"unsupported selector: {_sanitize(exc)}",
+                    remediation=_sanitize(getattr(exc, "remediation", "") or "", 300),
+                ),
+            ) from exc
+
+        run.trusted["snapshot"] = _snapshot_identity(entry)
+        run.trusted["extract"] = {
+            "mode": "selector",
+            "selector": selector,
+            "ranking": "document-order",
+            "matches_returned": len(matches),
+            "model_assisted": False,
+        }
+        run.untrusted["matches"] = [match.to_dict() for match in matches]
+        run.completeness = Completeness(
+            truncated=False,
+            omitted_regions=(
+                "selector-scoped: every part of the document outside "
+                f"{selector!r} was deliberately not returned",
+            ),
+            # Complete *for what was asked*: the selector's own content is
+            # returned whole, never truncated or summarized.
+            extraction_complete=True,
+        )
+        self._charge_observation(run, ledger, payload="\n".join(match.text for match in matches))
+
     def _op_page_links(
         self,
         run: _Run,
@@ -1707,6 +1963,12 @@ class WebGlassService:
         browser: BrowserBackend = self._require(self.browser, "browser backend", "browser")
         store: ArtifactStore = self._require(self.artifacts, "artifact store", "artifacts")
         run.backend = self._backend_label(browser)
+        if run.operation.target.url:
+            # "Open, then capture", the same explicit one-operation form every
+            # lens verb offers. Without it a screenshot would always need a
+            # separate prior invocation, which for a one-shot CLI means a
+            # session the caller has to create and close by hand.
+            self._open(run, ledger, cancel, deadline, url=run.operation.target.url)
         session_id = self._screenshot_session(run)
 
         started = self.clock.now()
@@ -1723,14 +1985,59 @@ class WebGlassService:
         # trusted control metadata.
         run.trusted["artifact"] = ref.to_dict()
         run.trusted["screenshot"] = {"session_id": session_id, "size_bytes": ref.size_bytes}
+        out = self._arg(run, "out")
+        if out:
+            run.trusted["screenshot"]["out_path"] = self._write_screenshot(run, png, str(out))
         self._charge(run, ledger, BudgetDimension.ARTIFACT_BYTES, ref.size_bytes)
         self._charge(run, ledger, BudgetDimension.TRANSFERRED_BYTES, ref.size_bytes)
 
+    #: The **only** place WebGlass writes bytes to a path its caller chose.
+    #: Grep for it: spec honesty h32 is that no other code path does, and
+    #: ``tests/test_verbs_live.py`` asserts that mechanically.
+    def _write_screenshot(self, run: _Run, png: bytes, out: str) -> str:
+        """Write a WebGlass-rendered PNG to the caller's path.
+
+        The distinction this method exists to keep sharp (spec scope boundary
+        c35 / honesty h32): these bytes are **not** remote-origin response
+        bytes. They are produced by Chromium's own screenshotter from the
+        rendered page — WebGlass asked for a PNG and got a PNG, with no
+        attacker-chosen filename, content type, or payload involved. That is
+        why ``--out`` is a convenience here and would be a quarantine bypass
+        for a download: a download's bytes and name come from the remote
+        origin, so they stay in quarantine behind the shell-cli export bridge
+        (issue #1 section 13, milestone M5).
+
+        A write failure is a structured result, never an escaping ``OSError``.
+        """
+        path = Path(out).expanduser()
+        try:
+            parent = path.parent
+            if str(parent):
+                parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(png)
+        except OSError as exc:
+            raise _Halt(
+                LifecycleState.FAILED,
+                OperationError(
+                    code=ERROR_ARTIFACT_WRITE_FAILED,
+                    message=f"could not write the screenshot to {_sanitize(out, 200)}: "
+                    f"{_sanitize(exc)}",
+                    remediation=(
+                        "choose a path in a directory you can write to; the artifact "
+                        "itself is still stored content-addressed and reachable by hash"
+                    ),
+                ),
+            ) from exc
+        run.effect("artifact-written-to-caller-path")
+        return str(path)
+
     def _screenshot_session(self, run: _Run) -> str:
-        """The session a screenshot captures: explicit, or the snapshot's own."""
+        """The session a screenshot captures: explicit, just-opened, or a snapshot's."""
         if run.operation.session_id is not None:
             self._require_session(run, run.operation.session_id, lease=True)
             return run.operation.session_id
+        if run.entry is not None:  # this operation opened the page itself
+            return run.entry.session_id
         page_ref = run.operation.target.page_ref
         entry = self.snapshots.get(page_ref) if page_ref else None
         if entry is not None:
@@ -1739,8 +2046,11 @@ class WebGlassService:
             LifecycleState.FAILED,
             OperationError(
                 code=ERROR_INVALID_ARGUMENT,
-                message="page.screenshot needs a session or a retained snapshot reference",
-                remediation="set operation.session_id, or target.page_ref from a page.open",
+                message="page.screenshot needs a session, a URL, or a retained snapshot",
+                remediation=(
+                    "set operation.session_id, target.url to open and capture in one "
+                    "operation, or target.page_ref from a previous page.open"
+                ),
             ),
         )
 

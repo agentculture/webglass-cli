@@ -150,12 +150,12 @@ itself (distinct from the global `overview`, which describes the agent).
 """
 
 # ---------------------------------------------------------------------------
-# The M1 web-operation surface (build plan task t10). Every verb below builds
-# a webglass.operations.WebOperation, executes it through the one
+# The web-operation surface (build plan tasks t10 + t13). Every verb below
+# builds a webglass.operations.WebOperation, executes it through the one
 # WebGlassService (webglass/service.py), and renders the same structured
-# WebOperationResult in text or --json — never a second contract. M1 ships
-# with no search/browser backend wired in by default (see
-# webglass/cli/_factory.py), so every verb that needs one reports a
+# WebOperationResult in text or --json — never a second contract. The browser
+# backend is wired in by default (see webglass/cli/_factory.py); the search
+# provider needs an API key. A verb whose backend is absent reports a
 # structured `backend_unavailable` result (exit 1) rather than failing
 # silently or falling back to a different kind of operation.
 # ---------------------------------------------------------------------------
@@ -170,12 +170,15 @@ provider authored them, not WebGlass.
 
 ## Status
 
-M1 ships with no search backend wired in, so this verb reports a structured
-`backend_unavailable` result (exit 1) until build plan t15 lands a real
-provider behind the `SearchProvider` seam.
+The provider is the Brave Search API, wired in when
+`$WEBGLASS_BRAVE_API_KEY` is set. Without it no provider is injected and this
+verb reports a structured `backend_unavailable` result (exit 1) — a
+configuration answer, not a crash. The key is read at call time and never
+written to a log, a session record, a result, or any WebGlass store.
 
 ## Usage
 
+    export WEBGLASS_BRAVE_API_KEY=...
     webglass search "widgets"
     webglass search "widgets" --limit 5 --json
 """
@@ -190,21 +193,40 @@ output is only a rendering of it, never a second contract.
 
 Bare `webglass page` (no sub-verb) prints `page overview`.
 
+## Naming the page
+
+Three ways, checked in this order:
+
+  - `--page-ref <snapshot-id>` — project a snapshot this process retained.
+    No network access at all.
+  - `--url <url>` — open the URL, then apply the verb, in one operation.
+  - `--session-id <id>` — re-read that session's *live* page without
+    navigating it. This is how a later one-shot invocation observes what an
+    earlier one's `page open` or `action press` did: navigating again would
+    destroy the in-memory page state being asked about.
+
+`page open` given no `--session-id` runs in a throwaway session created and
+closed inside the invocation, so it leaves no browser behind.
+
 ## Status
 
-M1 ships with no browser backend wired in, so every verb below reports a
-structured `backend_unavailable` result (exit 1) until build plan t11/t13
-land the Playwright adapter.
+A real Chromium is the default backend. Set `WEBGLASS_BROWSER_BACKEND=none`
+for the explicit browser-less posture, in which every verb below reports a
+structured `backend_unavailable` result (exit 1).
+
+Loopback and private-network targets stay denied by default: reaching a local
+app under test requires naming its origin in a `--policy-profile` file's
+`declared_targets`. A malformed profile fails closed (exit 2), never open.
 
 ## Usage
 
     webglass page overview
     webglass page open <url>
     webglass page read --page-ref <ref>
-    webglass page inspect --page-ref <ref> --lens outline
-    webglass page extract "query" --page-ref <ref>
+    webglass page inspect --url <url> --lens console --json
+    webglass page extract --selector '#agent-state' --url <url> --json
     webglass page links --page-ref <ref>
-    webglass page screenshot --page-ref <ref>
+    webglass page screenshot --url <url> --out shot.png
 
 ## See also
 
@@ -219,10 +241,20 @@ Navigate a session to `url` and retain the resulting `PageSnapshot` for later
 lens operations (`read`/`inspect`/`extract`/`links`/`screenshot`). Every
 navigation is policy-checked (URL and every redirect hop) before it happens.
 
+Console messages and uncaught page errors observed during the navigation are
+reported under `content.untrusted` — page-authored text, never rendered as a
+WebGlass diagnostic. Use `page inspect --lens console` to ask for them
+explicitly, including on a page that produced none.
+
+An unreachable target (connection refused, DNS failure, navigation timeout)
+is a structured `navigation_failed` result telling you to check your server:
+WebGlass never starts, stops, or supervises the app under test.
+
 ## Usage
 
     webglass page open https://example.com/
     webglass page open https://example.com/ --session-id <id> --json
+    webglass page open http://127.0.0.1:8000/ --policy-profile test-profile.json
 """
 
 _PAGE_READ = """\
@@ -230,12 +262,14 @@ _PAGE_READ = """\
 
 Ordered readable blocks from a retained snapshot, with a resumable cursor and
 a declared content budget. Pass `--page-ref` to project a snapshot already
-retained by an earlier `page open`, or `--url` to open-then-read in one call.
-A stale or unknown `--page-ref` fails clearly rather than silently re-fetching.
+retained by an earlier `page open`, `--url` to open-then-read in one call, or
+`--session-id` to read a session's live page without navigating it. A stale
+or unknown `--page-ref` fails clearly rather than silently re-fetching.
 
 ## Usage
 
     webglass page read --page-ref <ref>
+    webglass page read --session-id <id> --json
     webglass page read --page-ref <ref> --cursor block:3 --json
 """
 
@@ -243,26 +277,54 @@ _PAGE_INSPECT = """\
 # webglass page inspect
 
 Project one lens (`outline`, `controls`, `metadata`, `console`, `structure`)
-over a retained snapshot — a view of the same snapshot `page read` and `page
-extract` share, preserving stable block/link/field references.
+over a snapshot — a view of the same snapshot `page read` and `page extract`
+share, preserving stable block/link/field references.
+
+## The console lens
+
+`--lens console` reports the page's console messages and uncaught page errors
+(each with its source URL and line, where the browser provided one). Both are
+**always** present as lists, so a page that produced nothing yields two empty
+lists rather than silence: "observed, and there was nothing" and "nobody
+looked" are different answers, and only the first one lets you tell a dead
+canvas from a working one by evidence alone.
+
+That text is untrusted source material. A page logging
+`WEBGLASS WARNING: ...` gets it rendered under `content.untrusted` and
+nowhere else — never among the result's own warnings.
 
 ## Usage
 
     webglass page inspect --page-ref <ref> --lens controls
-    webglass page inspect --page-ref <ref> --lens console --json
+    webglass page inspect --url <url> --lens console --json
+    webglass page inspect --session-id <id> --lens console --json
 """
 
 _PAGE_EXTRACT = """\
-# webglass page extract <query>
+# webglass page extract [query]
 
-Query-focused block selection: blocks are ranked by distinct query-term
-overlap, ties broken by source order. Deterministic — never a model-generated
-summary; every returned block keeps its original `block:<n>` reference.
+Two deterministic modes — never a model-generated summary in either.
+
+**Query mode** (the positional argument): readable blocks ranked by distinct
+query-term overlap, ties broken by source order. Every returned block keeps
+its original `block:<n>` reference, so a citation still points at its source.
+
+**Selector mode** (`--selector`): exactly the matching elements' own content
+and nothing else — including elements the readable pipeline deliberately
+drops, such as a `<script type="application/json">` state node an app under
+test exposes for machine reading. The match text is returned verbatim, so it
+parses. Supported forms: `tag`, `#id`, `.class`, `[attr]`, `[attr=value]`,
+and combinations such as `script#agent-state`.
+
+A selector that matches nothing is a success with zero matches; a selector
+that is not understood is a structured `invalid_argument` naming the
+supported forms. Those are different states and stay different.
 
 ## Usage
 
     webglass page extract "pricing" --page-ref <ref>
-    webglass page extract "pricing" --page-ref <ref> --json
+    webglass page extract --selector '#agent-state' --url <url> --json
+    webglass page extract --selector '#keylog' --session-id <id> --json
 """
 
 _PAGE_LINKS = """\
@@ -274,7 +336,7 @@ the reference `action follow` consumes.
 ## Usage
 
     webglass page links --page-ref <ref>
-    webglass page links --page-ref <ref> --json
+    webglass page links --url <url> --json
 """
 
 _PAGE_SCREENSHOT = """\
@@ -282,13 +344,26 @@ _PAGE_SCREENSHOT = """\
 
 Capture the current page as a PNG stored in the injected artifact store; the
 result carries a content-addressed reference (hash + size), never the image
-bytes inline. Needs either `--session-id` or `--page-ref` (a retained
-snapshot names its own session).
+bytes inline. Names the page with `--session-id`, `--url` (open then
+capture), or `--page-ref` (a retained snapshot names its own session).
+
+## --out
+
+`--out PATH` also writes the PNG to a path you choose. This is the *only*
+place WebGlass writes bytes to a caller-supplied path, and the reason it is
+allowed here is that these are WebGlass-rendered bytes: the browser's own
+screenshotter produced them, with no attacker-chosen filename, content type,
+or payload involved. Remote-origin download bytes are a different thing and
+stay quarantined behind the shell-cli export bridge (milestone M5).
+
+A write failure is a structured `artifact_write_failed` result; the artifact
+itself is still stored and reachable by hash.
 
 ## Usage
 
     webglass page screenshot --page-ref <ref>
     webglass page screenshot --session-id <id> --json
+    webglass page screenshot --url <url> --out shot.png --json
 """
 
 _PAGE_OVERVIEW = """\
@@ -314,19 +389,23 @@ library API.
 
 Bare `webglass action` (no sub-verb) prints `action overview`.
 
-`action press` classifies as `remote-action` (it cannot be proven
-navigational) and previews by default; `--apply` is always denied at M1 —
-the prepare -> commit -> verify protocol lands at M5.
+`action press` classifies as `remote-action` (on the open web a key press
+cannot be proven navigational — `Enter` submits forms) and previews by
+default. Under a `--policy-profile` whose `declared_targets` name your app
+under test it classifies as `observe` and executes instead. `--apply` is
+denied either way; the prepare -> commit -> verify protocol lands at M5.
 
 ## Usage
 
     webglass action overview
     webglass action follow <page-ref> <link-ref>
     webglass action press Enter --session-id <id>
+    webglass action press a b c --session-id <id> --policy-profile test.json
 
 ## See also
 
   - `webglass explain page links`
+  - `webglass explain action press`
 """
 
 _ACTION_FOLLOW = """\
@@ -339,11 +418,10 @@ policy by putting a private-network href in an anchor.
 
 ## Status
 
-M1 ships with no browser backend wired in, and no snapshot to follow a link
-from without one, so this verb always reports a structured failure (exit 1)
-— `unknown_snapshot` for a page-ref naming nothing retained, or
-`backend_unavailable` once a real one does — until build plan t11/t13 land
-the Playwright adapter.
+Snapshots are retained per process, so pair this with a `page open` in the
+same invocation (or pass a `--page-ref` from one). A page-ref naming nothing
+retained is a structured `unknown_snapshot` failure (exit 1); durable,
+cross-invocation snapshot retention is milestone M3.
 
 ## Usage
 
@@ -354,17 +432,38 @@ the Playwright adapter.
 _ACTION_PRESS = """\
 # webglass action press <keys...>
 
-Dispatch a key sequence on an open session. Classifies as `remote-action`
-(CLAUDE.md "Target architecture" section 3: a key press cannot be proven
-navigational outside a declared test profile) and previews by default;
-passing `--apply` requests apply and is always denied at M1 — the
-prepare -> commit -> verify protocol lands at M5.
+Dispatch a key sequence to a session's focused page, in order, optionally
+with `--delay-ms` between consecutive keys. Key names are the browser's own
+`KeyboardEvent.key` values (`a`, `ArrowRight`, `Enter`).
+
+## Effect class
+
+By default this classifies as `remote-action` and **previews**: nothing is
+dispatched. That is classify-upward doing its job — on the open web a key
+press cannot be proven navigational, because `Enter` submits forms
+(CLAUDE.md "Target architecture" section 3).
+
+Under a `--policy-profile` whose `declared_targets` name your app under test,
+it classifies as `observe` and executes, all keys included. The profile is
+the authorization, and it is data in a file — not a flag that widens policy,
+and not a code path that skips it. The same profile is what lets the session
+reach a loopback app in the first place.
+
+`--apply` is denied in both cases: the prepare -> commit -> verify protocol
+for real remote actions lands at M5.
+
+## Reading back what the keys did
+
+`content.trusted.press.pressed` echoes what you asked for. To see what the
+*page* did with it, re-read the live page:
+`webglass page extract --selector '#keylog' --session-id <id> --json`.
 
 ## Usage
 
-    webglass action press Enter --session-id <id>
-    webglass action press a b c --session-id <id> --delay-ms 50 --json
-    webglass action press Enter --session-id <id> --apply   # denied at M1
+    webglass action press Enter --session-id <id>              # previews
+    webglass action press a b c --session-id <id> --delay-ms 50 \\
+        --policy-profile test.json --json                      # executes
+    webglass action press Enter --session-id <id> --apply       # denied
 """
 
 _ACTION_OVERVIEW = """\

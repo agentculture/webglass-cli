@@ -22,8 +22,9 @@ from collections.abc import Iterator
 import pytest
 
 from tests.fixtures.server import FixtureSite
+from webglass.adapters.brave import WEBGLASS_BRAVE_API_KEY_ENV
 from webglass.adapters.session_store import ALLOW_UNSANDBOXED_ENV, STATE_DIR_ENV
-from webglass.cli._factory import BROWSER_BACKEND_ENV
+from webglass.cli._factory import BROWSER_BACKEND_ENV, POLICY_PROFILE_ENV
 
 
 @pytest.fixture(autouse=True)
@@ -40,15 +41,27 @@ def isolated_session_state(
     runs -- and cross-test session leakage is the exact failure this store
     exists to make impossible.
 
-    The browser-selection and sandbox-opt-in variables are cleared for the
-    same reason in the other direction: a developer who exported
-    ``WEBGLASS_BROWSER_BACKEND=playwright`` in their shell must not thereby
-    turn the default suite into one that launches Chromium. Tests that want a
-    browser set these explicitly, in the subprocess environment they build.
+    The browser posture is pinned for the same reason in the other direction.
+    Since build plan t13 the *shipped* default is
+    ``WEBGLASS_BROWSER_BACKEND=playwright`` — ``webglass page open URL`` drives
+    a real Chromium — so the default suite has to opt out **explicitly** rather
+    than by unsetting a variable. ``none`` is a real, documented posture (the
+    page/action verbs then report a structured ``backend_unavailable``), and
+    pinning it here is what keeps the browser-free suite browser-free on any
+    developer's machine. Tests that want a browser set these variables
+    themselves, in the subprocess environment they build.
+
+    The two remaining variables are cleared so an exported shell value cannot
+    change what the suite tests: ``WEBGLASS_BRAVE_API_KEY`` would wire a real
+    search provider (and could send a query to a live API), and
+    ``WEBGLASS_POLICY_PROFILE`` would silently replace the deny-by-default
+    policy every policy assertion here is written against.
     """
     monkeypatch.setenv(STATE_DIR_ENV, str(tmp_path_factory.mktemp("webglass-state")))
-    monkeypatch.delenv(BROWSER_BACKEND_ENV, raising=False)
+    monkeypatch.setenv(BROWSER_BACKEND_ENV, "none")
     monkeypatch.delenv(ALLOW_UNSANDBOXED_ENV, raising=False)
+    monkeypatch.delenv(WEBGLASS_BRAVE_API_KEY_ENV, raising=False)
+    monkeypatch.delenv(POLICY_PROFILE_ENV, raising=False)
     assert os.environ[STATE_DIR_ENV]  # nosec B101 - guards the fixture itself
 
 

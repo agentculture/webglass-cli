@@ -1033,16 +1033,24 @@ def test_the_default_cli_store_is_the_file_store_in_the_state_directory(
     assert isinstance(_factory.build_service().sessions, FileSessionStore)
 
 
-def test_the_browser_backend_is_off_by_default_and_explicitly_selectable(
+def test_the_browser_backend_is_on_by_default_and_explicitly_switchable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(_factory.BROWSER_BACKEND_ENV, raising=False)
-    assert _factory.browser_backend_name() == "none"
-    assert _factory.build_service().browser is None
+    """Build plan t13 flipped this default; t12 wired what it flips onto.
 
-    monkeypatch.setenv(_factory.BROWSER_BACKEND_ENV, "playwright")
+    Unset means ``playwright`` — the point of M2 is that ``page open`` opens a
+    real page. ``none`` stays a first-class, documented posture rather than an
+    accident of an unset variable, which is why the whole default test suite
+    pins it (``tests/conftest.py``).
+    """
+    monkeypatch.delenv(_factory.BROWSER_BACKEND_ENV, raising=False)
     assert _factory.browser_backend_name() == "playwright"
     assert _factory.build_session_store().launcher is not None
+
+    monkeypatch.setenv(_factory.BROWSER_BACKEND_ENV, "none")
+    assert _factory.browser_backend_name() == "none"
+    assert _factory.build_service().browser is None
+    assert _factory.build_session_store().launcher is None
 
 
 def test_an_unknown_browser_backend_is_an_environment_error(
