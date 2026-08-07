@@ -130,7 +130,15 @@ class FakeFetchBackend:
         self._not_found_status = not_found_status
         self.requested_urls: list[str] = []
 
-    def fetch(self, url: str, *, method: str = "GET") -> FetchResult:
+    def fetch(
+        self,
+        url: str,
+        *,
+        # NOSONAR(S1172): part of the FetchBackend protocol signature -- the
+        # canned route table answers the same way whatever the method is, but
+        # dropping the parameter would break conformance with the seam.
+        method: str = "GET",  # NOSONAR(S1172)
+    ) -> FetchResult:
         self.requested_urls.append(url)
         chain: list[NavigationHop] = []
         current = url

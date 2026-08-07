@@ -43,6 +43,9 @@ from webglass.effects import OperationKind
 from webglass.operations import OperationTarget
 from webglass.service import INSPECT_LENSES
 
+#: Shared ``--json`` help text; every verb in this noun takes the flag.
+_JSON_HELP = "Emit structured JSON."
+
 _OVERVIEW_SECTIONS = [
     {
         "title": "Verbs",
@@ -223,13 +226,13 @@ def _add_page_selection(parser: argparse.ArgumentParser, verb: str) -> None:
 def _finish(parser: argparse.ArgumentParser, handler: Any) -> None:
     """The flags and defaults every web verb shares."""
     _factory.add_policy_profile_argument(parser)
-    parser.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    parser.add_argument("--json", action="store_true", help=_JSON_HELP)
     parser.set_defaults(func=handler)
 
 
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("page", help="Open/read/inspect/extract/links/screenshot one page.")
-    p.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    p.add_argument("--json", action="store_true", help=_JSON_HELP)
     p.set_defaults(func=_no_verb, json=False)
     # `p` is a _CliArgumentParser (the top-level subparsers were built with that
     # parser_class); propagate it so every `page <verb>` parse error routes
@@ -237,7 +240,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     noun_sub = p.add_subparsers(dest="page_command", parser_class=type(p))
 
     ov = noun_sub.add_parser("overview", help="Describe the page noun's verbs.")
-    ov.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    ov.add_argument("--json", action="store_true", help=_JSON_HELP)
     ov.set_defaults(func=cmd_page_overview)
 
     op = noun_sub.add_parser("open", help="Navigate a session to a URL.")

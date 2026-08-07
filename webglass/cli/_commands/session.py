@@ -23,6 +23,9 @@ from webglass.cli import _factory
 from webglass.cli._commands.overview import emit_overview
 from webglass.effects import OperationKind
 
+#: Shared ``--json`` help text; every verb in this noun takes the flag.
+_JSON_HELP = "Emit structured JSON."
+
 _OVERVIEW_SECTIONS = [
     {
         "title": "Verbs",
@@ -112,7 +115,7 @@ def cmd_session_clean(args: argparse.Namespace) -> int:
 
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("session", help="Create/list/show/close/clean browser sessions.")
-    p.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    p.add_argument("--json", action="store_true", help=_JSON_HELP)
     p.set_defaults(func=_no_verb, json=False)
     # `p` is a _CliArgumentParser; propagate it so every `session <verb>` parse
     # error routes through the structured error contract (see
@@ -120,29 +123,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     noun_sub = p.add_subparsers(dest="session_command", parser_class=type(p))
 
     ov = noun_sub.add_parser("overview", help="Describe the session noun's verbs.")
-    ov.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    ov.add_argument("--json", action="store_true", help=_JSON_HELP)
     ov.set_defaults(func=cmd_session_overview)
 
     cr = noun_sub.add_parser("create", help="Create a new browser session record.")
     cr.add_argument("--ttl-seconds", type=float, default=None, help="Session lifetime in seconds.")
     cr.add_argument("--session-id", default=None, help="Use this id instead of a minted one.")
-    cr.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    cr.add_argument("--json", action="store_true", help=_JSON_HELP)
     cr.set_defaults(func=cmd_session_create)
 
     ls = noun_sub.add_parser("list", help="List this caller's own sessions.")
-    ls.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    ls.add_argument("--json", action="store_true", help=_JSON_HELP)
     ls.set_defaults(func=cmd_session_list)
 
     sh = noun_sub.add_parser("show", help="Show one session's public record.")
     sh.add_argument("session_id", help="The session id to show.")
-    sh.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    sh.add_argument("--json", action="store_true", help=_JSON_HELP)
     sh.set_defaults(func=cmd_session_show)
 
     cl = noun_sub.add_parser("close", help="Close a session.")
     cl.add_argument("session_id", help="The session id to close.")
-    cl.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    cl.add_argument("--json", action="store_true", help=_JSON_HELP)
     cl.set_defaults(func=cmd_session_close)
 
     cn = noun_sub.add_parser("clean", help="Reap this store's expired sessions.")
-    cn.add_argument("--json", action="store_true", help="Emit structured JSON.")
+    cn.add_argument("--json", action="store_true", help=_JSON_HELP)
     cn.set_defaults(func=cmd_session_clean)

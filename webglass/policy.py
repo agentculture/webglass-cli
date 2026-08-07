@@ -48,8 +48,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from ipaddress import AddressValueError, IPv4Address, IPv6Address, ip_address
-from typing import Any, Iterable, Mapping, Sequence
+from ipaddress import IPv4Address, IPv6Address, ip_address
+from typing import Any, Iterable, Mapping, Sequence, cast
 from urllib.parse import urlsplit
 
 __all__ = [
@@ -165,11 +165,14 @@ _SPECIFIC_SCHEME_RULE_IDS: Mapping[str, str] = {
 #: unconditionally --- including when a profile declares them as targets.
 METADATA_IP_ADDRESSES: frozenset[IPv4Address | IPv6Address] = frozenset(
     {
-        ip_address("169.254.169.254"),
-        ip_address("169.254.170.2"),
-        ip_address("100.100.100.200"),
-        ip_address("192.0.0.192"),
-        ip_address("fd00:ec2::254"),
+        # NOSONAR(S1313) on each literal: this is the metadata-endpoint
+        # *denylist* -- hardcoding the addresses is the security feature, not
+        # a leaked deployment detail. They are IANA-assigned, not ours.
+        ip_address("169.254.169.254"),  # NOSONAR(S1313): denylist entry
+        ip_address("169.254.170.2"),  # NOSONAR(S1313): denylist entry
+        ip_address("100.100.100.200"),  # NOSONAR(S1313): denylist entry
+        ip_address("192.0.0.192"),  # NOSONAR(S1313): denylist entry
+        ip_address("fd00:ec2::254"),  # NOSONAR(S1313): denylist entry
     }
 )
 
@@ -611,7 +614,9 @@ class WebPolicyProfile:
     def with_declared_targets(self, specs: Iterable[str]) -> WebPolicyProfile:
         """A copy of this profile with additional declared targets."""
         added = tuple(DeclaredTarget.parse(spec) for spec in specs)
-        return replace(self, declared_targets=self.declared_targets + added)
+        # ``dataclasses.replace`` is typed as returning a bare DataclassInstance;
+        # the concrete type is this class by construction.
+        return cast(WebPolicyProfile, replace(self, declared_targets=self.declared_targets + added))
 
 
 # ---------------------------------------------------------------------------
@@ -648,20 +653,33 @@ def _classify_address(ip: IPv4Address | IPv6Address) -> tuple[str, str] | None:
     if candidates & METADATA_IP_ADDRESSES:
         return "metadata", "cloud instance-metadata endpoint"
     for candidate in (_unmap(ip), ip):
-        if candidate.is_loopback:
-            return "loopback", "loopback address"
-        if candidate.is_link_local:
-            return "link-local", "link-local address"
-        if candidate.is_unspecified:
-            return "reserved", "unspecified address"
-        if candidate.is_multicast:
-            return "reserved", "multicast address"
-        if candidate.is_reserved:
-            return "reserved", "reserved address"
-        if candidate.is_private:
-            return "private", "private-network address"
-        if not candidate.is_global:
-            return "reserved", "non-globally-routable address"
+        classified = _classify_single_address(candidate)
+        if classified is not None:
+            return classified
+    return None
+
+
+def _classify_single_address(candidate: IPv4Address | IPv6Address) -> tuple[str, str] | None:
+    """The non-metadata half of :func:`_classify_address`, for one address.
+
+    Order matters: the most specific reason a caller can act on wins, and
+    ``is_global`` is the catch-all floor so an address family nobody enumerated
+    still fails closed.
+    """
+    if candidate.is_loopback:
+        return "loopback", "loopback address"
+    if candidate.is_link_local:
+        return "link-local", "link-local address"
+    if candidate.is_unspecified:
+        return "reserved", "unspecified address"
+    if candidate.is_multicast:
+        return "reserved", "multicast address"
+    if candidate.is_reserved:
+        return "reserved", "reserved address"
+    if candidate.is_private:
+        return "private", "private-network address"
+    if not candidate.is_global:
+        return "reserved", "non-globally-routable address"
     return None
 
 
@@ -669,7 +687,8 @@ def _parse_ip_literal(host: str) -> IPv4Address | IPv6Address | None:
     """Parse a host as a strict IP literal, or return ``None`` for a name."""
     try:
         return ip_address(host)
-    except (ValueError, AddressValueError):
+    except ValueError:
+        # AddressValueError is a ValueError subclass, so this catches both.
         return None
 
 
@@ -707,7 +726,8 @@ def _decode_legacy_ipv4(host: str) -> IPv4Address | None:
     packed |= values[-1]
     try:
         return IPv4Address(packed)
-    except (ValueError, AddressValueError):
+    except ValueError:
+        # AddressValueError is a ValueError subclass, so this catches both.
         return None
 
 
@@ -787,6 +807,66 @@ def _deny(url: str, rule_id: str, reason: str, hop_index: int | None = None) -> 
         reason=reason,
         hop_index=hop_index,
     )
+
+
+def _metadata_denial(
+    url: str,
+    safe_host: str,
+    literal: IPv4Address | IPv6Address | None,
+    name_class: tuple[str, str] | None,
+    hop_index: int | None,
+) -> PolicyVerdict | None:
+    """Rule 4: the cloud-metadata floor, which no allow may override.
+
+    An IP literal is classified as an address, anything else as a name ---
+    ``name_class`` is already ``None`` whenever ``literal`` is set.
+    """
+    classified = _classify_address(literal) if literal is not None else name_class
+    if classified is None or classified[0] != "metadata":
+        return None
+    return _deny(
+        url,
+        "target-deny-metadata",
+        f"{safe_host} is a {classified[1]}, which is never reachable",
+        hop_index,
+    )
+
+
+def _classification_denial(
+    url: str,
+    host: str,
+    safe_host: str,
+    literal: IPv4Address | IPv6Address | None,
+    name_class: tuple[str, str] | None,
+    hop_index: int | None,
+) -> PolicyVerdict | None:
+    """Rules 6-7: ambiguous encodings, then address/name classification.
+
+    ``None`` means nothing objected --- the caller treats that as an ordinary
+    public target.
+    """
+    if literal is not None:
+        classified = _classify_address(literal)
+        if classified is None:
+            return None
+        suffix, label = classified
+        return _deny(url, f"target-deny-{suffix}", f"{safe_host} is a {label}", hop_index)
+
+    legacy = _decode_legacy_ipv4(host)
+    if legacy is not None:
+        return _deny(
+            url,
+            "target-deny-ambiguous-host",
+            (
+                f"{safe_host} is an ambiguous legacy address encoding "
+                f"(resolves to {legacy}); declare an unambiguous origin"
+            ),
+            hop_index,
+        )
+    if name_class is None:
+        return None
+    suffix, label = name_class
+    return _deny(url, f"target-deny-{suffix}", f"{safe_host} is a {label}", hop_index)
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +958,9 @@ class WebPolicyEvaluator:
 
         parsed = _parse_url(url)
         if isinstance(parsed, PolicyVerdict):
-            return replace(parsed, hop_index=hop_index)
+            # ``replace`` on a PolicyVerdict yields a PolicyVerdict; the stub
+            # types it as a bare DataclassInstance.
+            return cast(PolicyVerdict, replace(parsed, hop_index=hop_index))
 
         scheme_verdict = self._check_scheme(url, parsed, hop_index)
         if scheme_verdict is not None:
@@ -923,29 +1005,41 @@ class WebPolicyEvaluator:
         host = parsed.host
         safe_host = _sanitize(host, 80)
         literal = _parse_ip_literal(host)
+        # A name is only classified as a name when it is not an IP literal.
+        name_class = _classify_hostname(host) if literal is None else None
 
         # 4. Metadata floor -- never overridable, so it precedes the allow.
-        if literal is not None:
-            classified = _classify_address(literal)
-            if classified is not None and classified[0] == "metadata":
-                return _deny(
-                    url,
-                    "target-deny-metadata",
-                    f"{safe_host} is a {classified[1]}, which is never reachable",
-                    hop_index,
-                )
-        name_class = _classify_hostname(host) if literal is None else None
-        if name_class is not None and name_class[0] == "metadata":
-            return _deny(
-                url,
-                "target-deny-metadata",
-                f"{safe_host} is a {name_class[1]}, which is never reachable",
-                hop_index,
-            )
+        metadata = _metadata_denial(url, safe_host, literal, name_class, hop_index)
+        if metadata is not None:
+            return metadata
 
         # 5. Declared app-under-test targets.
+        declared = self._declared_target_allow(url, parsed, safe_host, hop_index)
+        if declared is not None:
+            return declared
+
+        # 6-7. Classification.
+        denial = _classification_denial(url, host, safe_host, literal, name_class, hop_index)
+        if denial is not None:
+            return denial
+
+        # 8. Ordinary public target.
+        return PolicyVerdict(
+            decision=PolicyDecision.ALLOWED,
+            url=url,
+            matched_rule_ids=("scheme-allowed", "target-allow-public"),
+            reason=f"{safe_host} is a public target on an allowed scheme",
+            hop_index=hop_index,
+        )
+
+    def _declared_target_allow(
+        self, url: str, parsed: _ParsedTarget, safe_host: str, hop_index: int | None
+    ) -> PolicyVerdict | None:
+        """Rule 5: an exact match against a declared app-under-test origin."""
         for target in self.profile.declared_targets:
-            if target.matches(parsed.scheme, host, parsed.port, self.profile.allowed_schemes):
+            if target.matches(
+                parsed.scheme, parsed.host, parsed.port, self.profile.allowed_schemes
+            ):
                 return PolicyVerdict(
                     decision=PolicyDecision.ALLOWED,
                     url=url,
@@ -956,37 +1050,7 @@ class WebPolicyEvaluator:
                     ),
                     hop_index=hop_index,
                 )
-
-        # 6-7. Classification.
-        if literal is None:
-            legacy = _decode_legacy_ipv4(host)
-            if legacy is not None:
-                return _deny(
-                    url,
-                    "target-deny-ambiguous-host",
-                    (
-                        f"{safe_host} is an ambiguous legacy address encoding "
-                        f"(resolves to {legacy}); declare an unambiguous origin"
-                    ),
-                    hop_index,
-                )
-            if name_class is not None:
-                suffix, label = name_class
-                return _deny(url, f"target-deny-{suffix}", f"{safe_host} is a {label}", hop_index)
-        else:
-            classified = _classify_address(literal)
-            if classified is not None:
-                suffix, label = classified
-                return _deny(url, f"target-deny-{suffix}", f"{safe_host} is a {label}", hop_index)
-
-        # 8. Ordinary public target.
-        return PolicyVerdict(
-            decision=PolicyDecision.ALLOWED,
-            url=url,
-            matched_rule_ids=("scheme-allowed", "target-allow-public"),
-            reason=f"{safe_host} is a public target on an allowed scheme",
-            hop_index=hop_index,
-        )
+        return None
 
     def evaluate_redirect_chain(self, urls: Sequence[str]) -> list[PolicyVerdict]:
         """Evaluate a known chain hop by hop, stopping at the first refusal.
