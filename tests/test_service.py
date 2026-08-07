@@ -238,7 +238,8 @@ def test_search_returns_a_fully_populated_structured_result() -> None:
     assert result.content.trusted["search"]["provider_id"] == "fake-search"
     assert result.content.trusted["effect_class"] == EffectClass.OBSERVE.value
     # Every result identifies live vs cached, its backend, and its timings.
-    assert result.cache is not None and result.cache.mode is CacheMode.LIVE
+    assert result.cache is not None
+    assert result.cache.mode is CacheMode.LIVE
     assert result.cache.hit is False
     assert result.backend == "FakeSearchProvider:fake-search"
     assert result.timings.started_at == "2023-11-14T22:13:20Z"
@@ -320,7 +321,8 @@ def test_page_open_denies_a_loopback_target_without_touching_the_backend() -> No
     result = open_page(service, make_context(), url=PRIVATE_URL)
 
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_POLICY_DENIED
+    assert result.error is not None
+    assert result.error.code == ERROR_POLICY_DENIED
     assert result.policy_verdict.decision == PolicyDecision.DENIED.value
     assert "target-deny-loopback" in result.policy_verdict.matched_rule_ids
     assert browser.opened == []
@@ -334,7 +336,8 @@ def test_service_revalidates_every_redirect_hop_even_when_the_adapter_did_not() 
     result = open_page(service, make_context(), url=EVIL_REDIRECT_URL)
 
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_POLICY_DENIED
+    assert result.error is not None
+    assert result.error.code == ERROR_POLICY_DENIED
     # Partial evidence: the navigation that did happen is still reported.
     assert [hop.requested_url for hop in result.navigation_history] == [
         EVIL_REDIRECT_URL,
@@ -353,7 +356,8 @@ def test_adapter_side_block_is_reported_as_a_denial_with_its_verdict() -> None:
     result = open_page(service, make_context(), url=EVIL_REDIRECT_URL)
 
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_POLICY_DENIED
+    assert result.error is not None
+    assert result.error.code == ERROR_POLICY_DENIED
     assert result.policy_verdict.decision == PolicyDecision.DENIED.value
 
 
@@ -375,7 +379,8 @@ def test_malformed_policy_fails_closed_and_is_distinct_from_a_denial() -> None:
     result = open_page(service, make_context())
 
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_POLICY_ERROR
+    assert result.error is not None
+    assert result.error.code == ERROR_POLICY_ERROR
     assert result.policy_verdict.decision == PolicyDecision.ERROR.value
     assert result.content.trusted["policy"]["source"] == "blocked"
 
@@ -433,7 +438,8 @@ def test_apply_on_a_remote_action_is_denied_until_the_m5_protocol_exists() -> No
         make_context(),
     )
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_APPLY_UNAVAILABLE
+    assert result.error is not None
+    assert result.error.code == ERROR_APPLY_UNAVAILABLE
 
 
 def test_effect_class_override_seam_lets_a_test_profile_execute_press() -> None:
@@ -515,7 +521,8 @@ def test_lens_against_an_unretained_snapshot_fails_rather_than_re_opening() -> N
         make_context(),
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_UNKNOWN_SNAPSHOT
+    assert result.error is not None
+    assert result.error.code == ERROR_UNKNOWN_SNAPSHOT
     assert browser.opened == []
 
 
@@ -537,7 +544,8 @@ def test_a_lens_with_no_target_at_all_is_an_argument_error() -> None:
     service = make_service()
     result = service.execute(make_operation(OperationKind.PAGE_LINKS), make_context())
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
 
 
 def test_page_read_declares_omissions_and_resumes_from_its_cursor() -> None:
@@ -557,7 +565,8 @@ def test_page_read_declares_omissions_and_resumes_from_its_cursor() -> None:
     assert first.completeness.extraction_complete is False
     assert first.content.untrusted["omissions"][0]["kind"] == "budget"
     cursor = first.content.derived["read"]["cursor"]
-    assert cursor and first.content.derived["read"]["done"] is False
+    assert cursor
+    assert first.content.derived["read"]["done"] is False
 
     second = service.execute(
         make_operation(OperationKind.PAGE_READ, target=target, normalized_args={"cursor": cursor}),
@@ -583,7 +592,8 @@ def test_a_cursor_from_another_snapshot_fails_as_stale_not_as_a_wrong_block() ->
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_STALE_REFERENCE
+    assert result.error is not None
+    assert result.error.code == ERROR_STALE_REFERENCE
     assert "snapshot generation" in result.error.remediation
 
 
@@ -618,7 +628,8 @@ def test_an_unknown_inspect_lens_is_a_structured_argument_error() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
     assert "outline" in result.error.remediation
 
 
@@ -656,7 +667,8 @@ def test_page_extract_requires_a_query() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
 
 
 def test_page_screenshot_stores_a_decodable_artifact() -> None:
@@ -688,14 +700,16 @@ def test_page_screenshot_without_an_artifact_store_is_structured() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_BACKEND_UNAVAILABLE
+    assert result.error is not None
+    assert result.error.code == ERROR_BACKEND_UNAVAILABLE
 
 
 def test_page_screenshot_needs_a_session_or_a_snapshot() -> None:
     service = make_service()
     result = service.execute(make_operation(OperationKind.PAGE_SCREENSHOT), make_context())
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +751,8 @@ def test_action_follow_policy_checks_the_page_supplied_href() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_POLICY_DENIED
+    assert result.error is not None
+    assert result.error.code == ERROR_POLICY_DENIED
     assert browser.opened == [("session-1", HOME_URL)]
 
 
@@ -755,7 +770,8 @@ def test_action_follow_refuses_a_reference_from_another_snapshot() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_STALE_REFERENCE
+    assert result.error is not None
+    assert result.error.code == ERROR_STALE_REFERENCE
 
 
 def test_action_follow_requires_a_link_reference() -> None:
@@ -767,7 +783,8 @@ def test_action_follow_requires_a_link_reference() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
 
 
 def test_action_follow_rejects_a_non_link_reference_kind() -> None:
@@ -782,7 +799,8 @@ def test_action_follow_rejects_a_non_link_reference_kind() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_REFERENCE
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_REFERENCE
 
 
 # ---------------------------------------------------------------------------
@@ -870,7 +888,8 @@ def test_a_session_belonging_to_another_caller_is_denied_without_naming_them() -
         make_operation(OperationKind.SESSION_SHOW, session_id=session_id), intruder
     )
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_SESSION_NOT_OWNED
+    assert result.error is not None
+    assert result.error.code == ERROR_SESSION_NOT_OWNED
     assert "colleague" not in result.error.message
 
     listed = service.execute(make_operation(OperationKind.SESSION_LIST), intruder)
@@ -889,7 +908,8 @@ def test_two_tasks_of_one_caller_cannot_share_a_live_session() -> None:
 
     other_task = open_page(service, make_context(task="task-2"), session_id=session_id)
     assert other_task.lifecycle_state is LifecycleState.DENIED
-    assert other_task.error is not None and other_task.error.code == ERROR_SESSION_LEASE_HELD
+    assert other_task.error is not None
+    assert other_task.error.code == ERROR_SESSION_LEASE_HELD
 
 
 def test_an_unknown_session_is_a_structured_failure() -> None:
@@ -898,14 +918,16 @@ def test_an_unknown_session_is_a_structured_failure() -> None:
         make_operation(OperationKind.SESSION_SHOW, session_id="nope"), make_context()
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_UNKNOWN_SESSION
+    assert result.error is not None
+    assert result.error.code == ERROR_UNKNOWN_SESSION
 
 
 def test_session_show_requires_an_id() -> None:
     service = make_service()
     result = service.execute(make_operation(OperationKind.SESSION_SHOW), make_context())
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
 
 
 def test_navigation_without_a_session_uses_an_unstored_ephemeral_one() -> None:
@@ -980,9 +1002,11 @@ def test_cache_only_is_blocked_rather_than_silently_served_live() -> None:
     result = open_page(service, make_context(), cache_mode=CacheMode.CACHE_ONLY)
 
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_CACHE_UNAVAILABLE
+    assert result.error is not None
+    assert result.error.code == ERROR_CACHE_UNAVAILABLE
     assert browser.opened == []
-    assert result.cache is not None and result.cache.mode is CacheMode.CACHE_ONLY
+    assert result.cache is not None
+    assert result.cache.mode is CacheMode.CACHE_ONLY
 
 
 @pytest.mark.parametrize("mode", [CacheMode.PREFER_CACHE, CacheMode.REFRESH])
@@ -991,7 +1015,8 @@ def test_cache_preferring_modes_are_served_live_with_a_declared_warning(mode: Ca
     result = open_page(service, make_context(), cache_mode=mode)
     assert result.lifecycle_state is LifecycleState.SUCCEEDED
     assert any("no cache layer exists yet" in warning for warning in result.warnings)
-    assert result.cache is not None and result.cache.hit is False
+    assert result.cache is not None
+    assert result.cache.hit is False
 
 
 def test_no_store_does_not_retain_the_snapshot() -> None:
@@ -1015,7 +1040,8 @@ def test_an_unknown_operation_kind_is_reported_not_previewed() -> None:
         make_context(),
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_UNSUPPORTED_KIND
+    assert result.error is not None
+    assert result.error.code == ERROR_UNSUPPORTED_KIND
     assert "page.open" in result.error.remediation
 
 
@@ -1024,7 +1050,8 @@ def test_a_raising_backend_becomes_a_structured_failure_not_a_traceback() -> Non
     result = open_page(service, make_context())
 
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_BACKEND_FAILURE
+    assert result.error is not None
+    assert result.error.code == ERROR_BACKEND_FAILURE
     assert "RuntimeError" in result.error.message
     # The backend's text is sanitized: it cannot forge a second diagnostic line.
     assert "\n" not in result.error.message
@@ -1038,7 +1065,8 @@ def test_page_open_never_falls_back_to_the_fetch_backend() -> None:
     result = open_page(service, make_context())
 
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_BACKEND_UNAVAILABLE
+    assert result.error is not None
+    assert result.error.code == ERROR_BACKEND_UNAVAILABLE
     assert fetch.requested_urls == []
 
 
@@ -1048,14 +1076,16 @@ def test_search_without_a_provider_is_structured() -> None:
         make_operation(OperationKind.SEARCH, normalized_args={"query": "widgets"}), make_context()
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_BACKEND_UNAVAILABLE
+    assert result.error is not None
+    assert result.error.code == ERROR_BACKEND_UNAVAILABLE
 
 
 def test_search_requires_a_query() -> None:
     service = make_service()
     result = service.execute(make_operation(OperationKind.SEARCH), make_context())
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
 
 
 def test_every_error_code_the_module_emits_is_registered() -> None:
@@ -1076,7 +1106,8 @@ def test_a_response_over_the_operation_limit_is_blocked() -> None:
     service = make_service()
     result = open_page(service, make_context(), limits=ResourceLimits(max_response_bytes=10))
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_RESPONSE_TOO_LARGE
+    assert result.error is not None
+    assert result.error.code == ERROR_RESPONSE_TOO_LARGE
     assert "over the limit" in result.error.message
 
 
@@ -1086,7 +1117,8 @@ def test_a_redirect_chain_over_the_operation_limit_is_blocked() -> None:
         service, make_context(), url=REDIRECT_URL, limits=ResourceLimits(max_redirects=0)
     )
     assert result.lifecycle_state is LifecycleState.BLOCKED
-    assert result.error is not None and result.error.code == ERROR_REDIRECT_LIMIT
+    assert result.error is not None
+    assert result.error.code == ERROR_REDIRECT_LIMIT
     assert "redirect hop" in result.error.message
     assert result.navigation_history, "the hops that happened are still reported"
 
@@ -1106,7 +1138,8 @@ def test_snapshot_registry_evicts_the_oldest_entry() -> None:
     result = service.execute(
         make_operation(OperationKind.PAGE_READ, target=OperationTarget(page_ref=first)), context
     )
-    assert result.error is not None and result.error.code == ERROR_UNKNOWN_SNAPSHOT
+    assert result.error is not None
+    assert result.error.code == ERROR_UNKNOWN_SNAPSHOT
 
 
 def test_snapshot_registry_rejects_a_zero_capacity() -> None:
@@ -1183,7 +1216,8 @@ def test_a_closed_session_cannot_be_reused_for_navigation() -> None:
 
     result = open_page(service, context, session_id=session_id)
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_SESSION_NOT_ACTIVE
+    assert result.error is not None
+    assert result.error.code == ERROR_SESSION_NOT_ACTIVE
     assert "closed" in result.error.message
 
 
@@ -1191,7 +1225,8 @@ def test_page_open_without_a_target_url_is_an_argument_error() -> None:
     service = make_service()
     result = service.execute(make_operation(OperationKind.PAGE_OPEN), make_context())
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_ARGUMENT
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_ARGUMENT
     assert "target.url" in result.error.remediation
 
 
@@ -1207,7 +1242,8 @@ def test_a_link_reference_that_names_nothing_is_unknown_not_stale() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_UNKNOWN_REFERENCE
+    assert result.error is not None
+    assert result.error.code == ERROR_UNKNOWN_REFERENCE
 
 
 def test_a_malformed_reference_is_reported_as_invalid_syntax() -> None:
@@ -1222,14 +1258,16 @@ def test_a_malformed_reference_is_reported_as_invalid_syntax() -> None:
         context,
     )
     assert result.lifecycle_state is LifecycleState.FAILED
-    assert result.error is not None and result.error.code == ERROR_INVALID_REFERENCE
+    assert result.error is not None
+    assert result.error.code == ERROR_INVALID_REFERENCE
 
 
 def test_a_backend_block_without_a_verdict_is_still_a_structured_denial() -> None:
     service = make_service(browser=BlockingBrowser(routes()))
     result = open_page(service, make_context())
     assert result.lifecycle_state is LifecycleState.DENIED
-    assert result.error is not None and result.error.code == ERROR_POLICY_DENIED
+    assert result.error is not None
+    assert result.error.code == ERROR_POLICY_DENIED
     assert result.degraded_evidence is True
 
 
