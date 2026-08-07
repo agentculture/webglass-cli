@@ -30,8 +30,10 @@ before designing or contributing anything.
 What ships today is the agent-first introspection CLI and the contracts every
 future verb registers onto: command registration, the structured error contract,
 the stdout/stderr split, and the `explain` catalog. The runtime has **no
-third-party dependencies** (`dependencies = []`); Playwright arrives later as a
-declared extra behind a replaceable adapter.
+third-party dependencies** (`dependencies = []`) through M0. That changes at
+M2: Playwright becomes a **core** runtime dependency (not an optional extra —
+a 2026-08-07 decision, see `CLAUDE.md`), while the operation-model modules
+stay import-clean of Playwright behind a replaceable adapter seam.
 
 The planned surface, for orientation only — none of these verbs exist yet:
 
