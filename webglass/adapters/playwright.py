@@ -441,7 +441,11 @@ def launch_detached(
     appears; never a bare ``CalledProcessError`` or a Playwright exception.
     """
     directory = Path(user_data_dir)
-    directory.mkdir(parents=True, exist_ok=True)
+    # Chromium writes DevToolsActivePort (the secret-equivalent CDP endpoint)
+    # inside this directory, so its permissions cannot be left to the umask —
+    # and a pre-existing directory must be corrected, not trusted.
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
     log_path = directory / "chromium-launch.log"
     # A browser that was killed rather than closed leaves its
     # DevToolsActivePort behind. Reusing a profile directory would then hand
@@ -491,6 +495,10 @@ def launch_detached(
         time.sleep(_LAUNCH_POLL_SECONDS)
 
     process.kill()
+    # Reap the killed child so a long-lived caller that retries launches never
+    # accumulates zombies; best-effort — the raise below must not be masked.
+    with suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=5)
     raise BrowserLaunchError(
         code="browser_launch_timeout",
         message=(

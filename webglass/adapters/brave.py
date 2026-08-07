@@ -124,15 +124,38 @@ class TransportResponse:
 Transport = Callable[[str, Mapping[str, str], float], TransportResponse]
 
 
+def _validated_endpoint(endpoint: str) -> str:
+    """Constrain the search endpoint to ``https``, or ``http`` on loopback.
+
+    The ``endpoint`` parameter exists so tests can point the default
+    transport at a local fixture server — it must never widen into the
+    scheme-confusion surface (``file:``, ``ftp:``, redirects to local
+    resources) that bandit's B310 exists to catch. Anything but ``https://``
+    to any host, or ``http://`` to 127.0.0.1/::1/localhost, is a structured
+    configuration error.
+    """
+    parsed = urllib.parse.urlsplit(endpoint)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and host:
+        return endpoint
+    if parsed.scheme == "http" and host in ("127.0.0.1", "::1", "localhost"):
+        return endpoint
+    raise SearchProviderError(
+        f"search endpoint must be https:// (or http:// to loopback for tests), got {endpoint!r}",
+        category="configuration",
+    )
+
+
 def _urllib_transport(url: str, headers: Mapping[str, str], timeout: float) -> TransportResponse:
     """Default :data:`Transport`: stdlib ``urllib.request`` only.
 
-    ``url`` is always :data:`BRAVE_SEARCH_ENDPOINT` plus a query string this
-    module built itself from caller-supplied *values* (never a
-    caller-supplied URL or scheme) — the request target is fixed, so the
-    scheme-confusion class of issue bandit's B310 check exists to catch does
-    not apply here; suppressed locally with that justification, exactly as
-    ``webglass/pages.py`` does for its own narrowly-scoped B105 suppression.
+    ``url`` is :data:`BRAVE_SEARCH_ENDPOINT` (or a :func:`_validated_endpoint`
+    — ``https``, or loopback ``http`` for test fixtures) plus a query string
+    this module built itself from caller-supplied *values*, never a
+    caller-supplied URL or scheme — so the scheme-confusion class of issue
+    bandit's B310 check exists to catch cannot arise; suppressed locally with
+    that justification, exactly as ``webglass/pages.py`` does for its own
+    narrowly-scoped B105 suppression.
     """
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
@@ -209,7 +232,7 @@ class BraveSearchProvider:
         self._api_key = api_key
         self._transport = transport
         self._timeout = timeout
-        self._endpoint = endpoint
+        self._endpoint = _validated_endpoint(endpoint)
 
     def __repr__(self) -> str:
         # api_key is secret-equivalent — redacted exactly like

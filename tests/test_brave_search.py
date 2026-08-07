@@ -409,6 +409,42 @@ class TestConstructor:
         assert provider._api_key == "sk-private"
 
 
+class TestEndpointValidation:
+    """The endpoint parameter never widens into a scheme-confusion surface.
+
+    It exists so tests can target a loopback http fixture server; anything
+    else must be https. This is what keeps the transport's B310 suppression
+    honest (PR #11 review thread).
+    """
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "file:///etc/passwd",
+            "ftp://api.search.brave.com/res/v1/web/search",
+            "http://api.search.brave.com/res/v1/web/search",
+            "http://169.254.169.254/latest/meta-data",
+            "not-a-url",
+        ],
+    )
+    def test_non_https_non_loopback_endpoints_are_refused(self, endpoint: str) -> None:
+        with pytest.raises(SearchProviderError) as exc_info:
+            BraveSearchProvider("some-key", endpoint=endpoint)
+        assert exc_info.value.category == "configuration"
+
+    @pytest.mark.parametrize(
+        "endpoint",
+        [
+            "https://api.search.brave.com/res/v1/web/search",
+            "http://127.0.0.1:8123/search",
+            "http://localhost:8123/search",
+        ],
+    )
+    def test_https_and_loopback_http_endpoints_are_accepted(self, endpoint: str) -> None:
+        provider = BraveSearchProvider("some-key", endpoint=endpoint)
+        assert isinstance(provider, BraveSearchProvider)
+
+
 class TestFromEnv:
     def test_missing_env_var_names_it_in_the_error(self) -> None:
         with pytest.raises(SearchProviderError) as exc_info:
