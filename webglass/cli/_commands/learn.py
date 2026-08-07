@@ -48,16 +48,18 @@ thin Playwright wrapper, not a generic scraper, and not a fact checker.
 
 Status
 ------
-Pre-implementation overall (see
-https://github.com/agentculture/webglass-cli/issues/1) — but the M2
-observation surface is live: `page` and `action` drive a real headless
-Chromium by default, `session` records survive between one-shot invocations,
-and every verb returns the same structured WebOperationResult the library API
-returns. `search` needs $WEBGLASS_BRAVE_API_KEY; without it, it reports a
-structured `backend_unavailable` result, as do all web verbs under
+The M0-M2 surface is real and shipped (see
+https://github.com/agentculture/webglass-cli/issues/1): `page` and `action`
+drive a real headless Chromium by default, `session` records survive between
+one-shot invocations, and every verb returns the same structured
+WebOperationResult the library API returns. `search` needs
+$WEBGLASS_BRAVE_API_KEY; without it, it reports a structured
+`backend_unavailable` result, as do all web verbs under
 WEBGLASS_BROWSER_BACKEND=none. Loopback and private-network targets stay
 denied unless a --policy-profile declares them. The exploration, evidence,
-memory, policy, and operation nouns are not built yet.
+memory, policy, and operation nouns — and any remote action beyond
+`action press`'s preview/declared-test-profile execute — are not built yet;
+see https://github.com/agentculture/webglass-cli/issues/8 for that work.
 
 Commands
 --------
@@ -101,22 +103,25 @@ def _as_json_payload() -> dict[str, object]:
         "version": __version__,
         "purpose": (
             "The guarded web operations and evidence plane for AI agents "
-            "(pre-implementation overall — the M2 observation surface for page/action/"
-            "session is live against a real browser; evidence, exploration, and memory "
-            "land at M3)."
+            "(the M0-M2 surface is real and shipped — search/page/action/session drive "
+            "a real headless Chromium by default; evidence, exploration, memory, and "
+            "the Colleague library provider are M3+, tracked in issue #8)."
         ),
-        "status": "pre-implementation",
+        "status": "m0-m2-shipped",
         "status_detail": (
-            "The M2 observation surface is live: page and action drive a real headless "
-            "Chromium by default, session records survive between one-shot "
+            "The M0-M2 surface is real and shipped: page and action drive a real "
+            "headless Chromium by default, session records survive between one-shot "
             "invocations, and every verb returns the same structured "
             "WebOperationResult the library API returns. search needs "
             "$WEBGLASS_BRAVE_API_KEY; without it, it reports a structured "
             "'backend_unavailable' result, as does every web verb under "
             "WEBGLASS_BROWSER_BACKEND=none. Loopback and private-network targets stay "
             "denied unless a --policy-profile declares them. The exploration, "
-            "evidence, memory, policy, and operation nouns are not built yet. See "
-            "https://github.com/agentculture/webglass-cli/issues/1"
+            "evidence, memory, policy, and operation nouns are not built yet, and no "
+            "remote action beyond action press's preview/declared-test-profile execute "
+            "exists. See https://github.com/agentculture/webglass-cli/issues/8 for "
+            "that work, and https://github.com/agentculture/webglass-cli/issues/1 for "
+            "the full target architecture."
         ),
         "commands": [
             {"path": ["whoami"], "summary": "Identity probe from culture.yaml."},

@@ -34,9 +34,16 @@ synchronous — the CLI is a one-shot process; async, if a real backend ever
 needs it, is an adapter-internal implementation detail invisible at this
 seam.
 
-No import in this package, or anywhere else in ``webglass``, names
-``playwright`` — see ``tests/test_import_boundaries.py``. t11 is the first
-task allowed to add one, and only inside its own dedicated adapter module.
+No import in this package — or anywhere else in ``webglass`` outside
+:mod:`webglass.adapters.playwright` — names ``playwright``. That module (added
+by build plan task t11) is the one and only place it may appear;
+``tests/test_import_boundaries.py`` enforces this on every PR, and
+``webglass/service.py``, ``webglass/policy.py``, and every other
+operation-model module stay import-clean of it, exactly as this module's
+opening paragraph requires. Playwright itself is a **core** runtime dependency
+as of M2 (``pyproject.toml``, spec claim c8) — the seam this package defines
+is what keeps that dependency from leaking into the public API, not what
+keeps it out of the install.
 """
 
 from __future__ import annotations

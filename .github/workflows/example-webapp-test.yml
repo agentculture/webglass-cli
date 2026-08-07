@@ -1,0 +1,158 @@
+name: Example webapp test (CI recipe)
+
+# Runs the recipe documented in docs/ci-recipe.md for real, in this repo's own
+# CI (build plan task t16, spec claims c1/c18/c20/c22/c23, honesty h11/h18):
+# start a local static "app under test", drive it headlessly through
+# `webglass` verbs, and assert on the structured JSON results and exit codes
+# with plain `jq` — no WebGlass-side test framework or assertion DSL (spec
+# honesty h18/c20; CLAUDE.md "Target architecture" -> Test ownership).
+#
+# Kept cheap on purpose: it only runs when the surface it exercises could
+# plausibly have changed.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "webglass/**"
+      - "pyproject.toml"
+  push:
+    branches: [main]
+    paths:
+      - "webglass/**"
+      - "pyproject.toml"
+
+jobs:
+  example-webapp-test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
+
+      - run: uv python install 3.12
+
+      - run: uv sync
+
+      - name: Resolve the pinned playwright version (cache key)
+        id: playwright
+        run: |
+          VERSION=$(uv run python -c "import importlib.metadata as m; print(m.version('playwright'))")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      - run: uv run playwright install --with-deps chromium
+
+      - name: Allow unprivileged user namespaces (risk r4)
+        run: |
+          # ubuntu-24.04 GitHub-hosted runners restrict unprivileged user
+          # namespace creation via AppArmor
+          # (kernel.apparmor_restrict_unprivileged_userns=1), which makes a
+          # default *sandboxed* Chromium launch abort with "No usable
+          # sandbox!" — reproduced locally; see
+          # webglass/adapters/playwright.py's SANDBOX_REMEDIATION and risk
+          # r4 in docs/plans/2026-08-07-implement-webglass-issue-1.md
+          # ("t14 must verify the provisioning path yields a usable sandbox
+          # on GitHub Actions runners"). GitHub-hosted runners permit
+          # passwordless sudo, so this job restores a genuinely usable
+          # sandbox for Chromium rather than ever passing --no-sandbox,
+          # which the adapter refuses to do as an automatic fallback.
+          #
+          # Copied from the browser-test job in tests.yml (build plan t14) —
+          # every CI job that launches a real Chromium needs this step.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # -----------------------------------------------------------------
+      # The recipe itself — see docs/ci-recipe.md for the annotated version.
+      # -----------------------------------------------------------------
+
+      - name: Write the policy profile declaring the app under test
+        run: |
+          # Loopback stays denied by default (issue #1 section 10); this file
+          # is the explicit, scoped allow docs/ci-recipe.md describes — never
+          # a relaxation of the built-in denylist. webglass-cli#10's post-hoc
+          # redirect-containment posture (see CLAUDE.md) applies here too.
+          cat > policy-profile.json <<'JSON'
+          {
+            "name": "ci-example-webapp",
+            "declared_targets": ["127.0.0.1:8000"]
+          }
+          JSON
+
+      - name: Start the app under test
+        run: |
+          # WebGlass never starts, stops, or supervises the app under test
+          # (CLAUDE.md scope/boundaries) — that is always the caller's job,
+          # here a plain `python -m http.server` over two static pages.
+          python3 -m http.server 8000 \
+            --directory docs/examples/ci-recipe-app --bind 127.0.0.1 &
+          echo $! > server.pid
+          for _ in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8000/index.html > /dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8000/index.html > /dev/null
+
+      - name: session create
+        run: |
+          uv run webglass session create --session-id ci-recipe \
+            --ttl-seconds 300 --json | tee session.json
+          jq -e '.lifecycle_state == "succeeded"' session.json
+
+      - name: page open
+        run: |
+          uv run webglass page open http://127.0.0.1:8000/index.html \
+            --session-id ci-recipe --policy-profile policy-profile.json \
+            --json | tee open.json
+          jq -e '.lifecycle_state == "succeeded"' open.json
+
+      - name: page inspect --lens console (the field-lesson check — issue #9 item 2)
+        run: |
+          uv run webglass page inspect --session-id ci-recipe --lens console \
+            --policy-profile policy-profile.json --json | tee console.json
+          jq -e '
+            .lifecycle_state == "succeeded"
+            and .content.untrusted.console_messages == []
+            and .content.untrusted.page_errors == []
+          ' console.json
+
+      - name: page extract --selector (the agent-readable state node)
+        run: |
+          uv run webglass page extract --selector '#agent-state' \
+            --session-id ci-recipe --policy-profile policy-profile.json \
+            --json | tee extract.json
+          jq -e '.content.untrusted.matches | length == 1' extract.json
+          jq -r '.content.untrusted.matches[0].text' extract.json \
+            | jq -e '.status == "ready"'
+
+      - name: page screenshot --out
+        run: |
+          uv run webglass page screenshot --session-id ci-recipe \
+            --out shot.png --policy-profile policy-profile.json \
+            --json | tee screenshot.json
+          jq -e '.lifecycle_state == "succeeded"' screenshot.json
+          test -s shot.png
+
+      - name: session close
+        if: always()
+        run: |
+          uv run webglass session close ci-recipe --json | tee close.json
+          jq -e '.lifecycle_state == "succeeded"' close.json
+
+      - name: Stop the app under test
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true
+
+      - name: Upload the screenshot as a CI artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: webglass-ci-recipe-screenshot
+          path: shot.png
+          if-no-files-found: ignore

@@ -651,10 +651,12 @@ def test_learn_json_lists_the_new_command_paths() -> None:
     assert ("page", "overview") in paths
     assert ("action", "overview") in paths
     assert ("session", "overview") in paths
-    # The overall product status stays honest: most of issue #1 (exploration,
-    # evidence, memory, policy, operation, and every live backend) is still
-    # not built, even though the M1 operation surface now is.
-    assert payload["status"] == "pre-implementation"
+    # The overall product status stays honest in both directions: search/page/
+    # action/session are real and shipped (M0-M2), so status must not claim
+    # "pre-implementation" — but exploration/evidence/memory/policy/operation
+    # are still genuinely not built (M3+, issue #8), so status_detail must
+    # keep naming that gap rather than overclaiming completeness either.
+    assert payload["status"] != "pre-implementation"
     assert "not built" in payload["status_detail"]
     assert "backend_unavailable" in payload["status_detail"]
 

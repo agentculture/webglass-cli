@@ -78,17 +78,22 @@ def test_learn_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert payload["json_support"] is True
 
 
-def test_learn_json_declares_pre_implementation_status() -> None:
-    """A JSON consumer must not infer capabilities that are not built yet.
+def test_learn_json_declares_the_shipped_and_deferred_status_honestly() -> None:
+    """A JSON consumer must not infer capabilities that are not built yet —
+    nor be told a capability is missing once it ships.
 
-    The text body carries a Status section; the JSON payload has to say the same
-    thing in a machine-readable way, or an agent reading only `purpose` would
-    assume the web operation surface exists.
+    The text body carries a Status section; the JSON payload has to say the
+    same thing in a machine-readable way. As of the M0-M2 status pass,
+    search/page/action/session are real, so `status` must not claim
+    "pre-implementation" (that would tell an agent to distrust a live
+    capability); it must still name what genuinely is not built yet
+    (evidence/exploration/memory/policy/operation, tracked in issue #8).
     """
     payload = _as_json_payload()
-    assert payload["status"] == "pre-implementation"
+    assert payload["status"] != "pre-implementation"
     assert "not built" in payload["status_detail"]
-    assert "pre-implementation" in payload["purpose"]
+    assert "issues/8" in payload["status_detail"]
+    assert "pre-implementation" not in payload["purpose"]
 
 
 def test_learn_examples_use_the_real_console_script(
