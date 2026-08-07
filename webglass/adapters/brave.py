@@ -124,22 +124,22 @@ class TransportResponse:
 Transport = Callable[[str, Mapping[str, str], float], TransportResponse]
 
 
-def _validated_endpoint(endpoint: str) -> str:
-    """Constrain the search endpoint to ``https``, or ``http`` on loopback.
+def _check_endpoint(endpoint: str) -> None:
+    """Refuse any search endpoint that is not ``https`` or loopback ``http``.
 
     The ``endpoint`` parameter exists so tests can point the default
     transport at a local fixture server — it must never widen into the
     scheme-confusion surface (``file:``, ``ftp:``, redirects to local
     resources) that bandit's B310 exists to catch. Anything but ``https://``
-    to any host, or ``http://`` to 127.0.0.1/::1/localhost, is a structured
-    configuration error.
+    to any host, or ``http://`` to 127.0.0.1/::1/localhost, raises a
+    structured configuration error.
     """
     parsed = urllib.parse.urlsplit(endpoint)
     host = (parsed.hostname or "").lower()
     if parsed.scheme == "https" and host:
-        return endpoint
+        return
     if parsed.scheme == "http" and host in ("127.0.0.1", "::1", "localhost"):
-        return endpoint
+        return
     raise SearchProviderError(
         f"search endpoint must be https:// (or http:// to loopback for tests), got {endpoint!r}",
         category="configuration",
@@ -232,7 +232,8 @@ class BraveSearchProvider:
         self._api_key = api_key
         self._transport = transport
         self._timeout = timeout
-        self._endpoint = _validated_endpoint(endpoint)
+        _check_endpoint(endpoint)
+        self._endpoint = endpoint
 
     def __repr__(self) -> str:
         # api_key is secret-equivalent — redacted exactly like

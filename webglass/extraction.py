@@ -1035,9 +1035,9 @@ class _SelectorParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag in _VOID_TAGS:
             return
-        # NOSONAR(S7504): the list() is a snapshot, not a redundant conversion
-        # -- _finish() removes the capture from self._active as we iterate.
-        for capture in list(self._active):  # NOSONAR(S7504): mutated while iterated
+        # The list() is a snapshot, not a redundant conversion: _finish()
+        # removes the capture from self._active as we iterate.
+        for capture in list(self._active):  # NOSONAR(S7504)
             if capture["depth"] == len(self._stack) and capture["tag"] == tag:
                 self._finish(capture)
         if tag in self._stack:
@@ -1047,8 +1047,8 @@ class _SelectorParser(HTMLParser):
 
     def close(self) -> None:
         super().close()
-        # NOSONAR(S7504): snapshot copy -- _finish() mutates self._active.
-        for capture in list(self._active):  # NOSONAR(S7504): mutated while iterated
+        # Snapshot copy: _finish() mutates self._active while we iterate.
+        for capture in list(self._active):  # NOSONAR(S7504)
             self._finish(capture)
         self.matches.sort(key=lambda match: match.source_order)
 

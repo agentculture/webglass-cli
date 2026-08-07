@@ -134,9 +134,9 @@ class FakeFetchBackend:
         self,
         url: str,
         *,
-        # NOSONAR(S1172): part of the FetchBackend protocol signature -- the
-        # canned route table answers the same way whatever the method is, but
-        # dropping the parameter would break conformance with the seam.
+        # Part of the FetchBackend protocol signature: the canned route table
+        # answers the same way whatever the method is, but dropping the
+        # parameter would break conformance with the seam.
         method: str = "GET",  # NOSONAR(S1172)
     ) -> FetchResult:
         self.requested_urls.append(url)

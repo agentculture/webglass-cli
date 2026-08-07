@@ -165,14 +165,14 @@ _SPECIFIC_SCHEME_RULE_IDS: Mapping[str, str] = {
 #: unconditionally --- including when a profile declares them as targets.
 METADATA_IP_ADDRESSES: frozenset[IPv4Address | IPv6Address] = frozenset(
     {
-        # NOSONAR(S1313) on each literal: this is the metadata-endpoint
-        # *denylist* -- hardcoding the addresses is the security feature, not
-        # a leaked deployment detail. They are IANA-assigned, not ours.
-        ip_address("169.254.169.254"),  # NOSONAR(S1313): denylist entry
-        ip_address("169.254.170.2"),  # NOSONAR(S1313): denylist entry
-        ip_address("100.100.100.200"),  # NOSONAR(S1313): denylist entry
-        ip_address("192.0.0.192"),  # NOSONAR(S1313): denylist entry
-        ip_address("fd00:ec2::254"),  # NOSONAR(S1313): denylist entry
+        # This is the metadata-endpoint *denylist* -- hardcoding the addresses
+        # is the security feature, not a leaked deployment detail. They are
+        # IANA-assigned, not ours.
+        ip_address("169.254.169.254"),  # NOSONAR(S1313)
+        ip_address("169.254.170.2"),  # NOSONAR(S1313)
+        ip_address("100.100.100.200"),  # NOSONAR(S1313)
+        ip_address("192.0.0.192"),  # NOSONAR(S1313)
+        ip_address("fd00:ec2::254"),  # NOSONAR(S1313)
     }
 )
 

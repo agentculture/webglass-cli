@@ -358,9 +358,9 @@ class FakeBrowserBackend:
         self,
         session_id: str,
         keys: Sequence[str],
-        # NOSONAR(S1172): part of the BrowserBackend protocol signature -- an
-        # in-memory fake has nothing to delay, but dropping the parameter
-        # would stop this adapter conforming to the seam it stands in for.
+        # Part of the BrowserBackend protocol signature: an in-memory fake
+        # has nothing to delay, but dropping the parameter would stop this
+        # adapter conforming to the seam it stands in for.
         delay_ms: float = 0,  # NOSONAR(S1172)
     ) -> PressResult:
         state = self._state(session_id)
