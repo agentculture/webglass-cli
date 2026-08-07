@@ -25,12 +25,24 @@ and the calling agent draws the conclusions.
 
 ## Status
 
-**Pre-implementation.** The web operation surface (`search`, `page`, `action`,
-`session`, `exploration`, `evidence`, `memory`, `policy`, `operation`) is
-specified but not built — see the build brief at
-<https://github.com/agentculture/webglass-cli/issues/1>. What ships today is the
-agent-first introspection CLI below, plus the contracts every future verb
-registers onto. The runtime has no third-party dependencies yet.
+**The M0-M2 surface is real and shipped.** `search`, `page`, `action`, and
+`session` all execute through one operation service against a real headless
+Chromium (Playwright, a core runtime dependency since M2) — see
+`webglass explain page`, `webglass explain action`, and `webglass explain
+session`. `search` needs `$WEBGLASS_BRAVE_API_KEY`; without one, and for any
+web verb under `WEBGLASS_BROWSER_BACKEND=none`, the result is a structured
+`backend_unavailable` outcome, never a crash or a silent no-op. Loopback and
+private-network targets stay denied unless an explicit `--policy-profile`
+declares them.
+
+**`exploration`, `evidence`, `memory`, `policy`, and `operation` are not
+built yet** — tracked as milestones M3-M6 in
+<https://github.com/agentculture/webglass-cli/issues/8>. Remote actions
+beyond `action press`'s preview-by-default (or execute, under a declared test
+profile) do not exist: no fill/select/submit/upload/download, and no applied
+— only previewed — remote action anywhere in the surface. See the build
+brief at <https://github.com/agentculture/webglass-cli/issues/1> for the full
+target architecture.
 
 ## Invocation
 
@@ -45,6 +57,10 @@ and is **not** an invocable binary; `webglass` is the import package too.
 - `webglass overview` — descriptive snapshot of the agent.
 - `webglass doctor` — check the agent-identity invariants.
 - `webglass cli overview` — describe the CLI surface.
+- `webglass search <query>` — run a search operation (needs a search backend).
+- `webglass page open|read|inspect|extract|links|screenshot` — one page's lifecycle.
+- `webglass action follow|press` — follow a link reference or dispatch keys.
+- `webglass session create|list|show|close|clean` — browser session lifecycle.
 
 ## Contracts
 
@@ -63,6 +79,8 @@ traceback ever reaches stderr.
 
 - `webglass explain whoami`
 - `webglass explain doctor`
+- `webglass explain page`
+- `webglass explain session`
 """
 
 _WHOAMI = """\

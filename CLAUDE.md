@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What this repo is (and is not yet)
+## What this repo is (and what is still on the way)
 
 `webglass-cli` is **WebGlass** — *the guarded web operations and evidence plane
 for AI agents.* The single authoritative build brief is
@@ -45,28 +45,42 @@ Dependency direction stays one-way: `Colleague -> webglass-cli` and
 and shell-cli must never learn WebGlass semantics. They are sibling capability
 providers; neither becomes the other's god object.
 
-**None of the product exists yet.** What ships today is the
-`culture-agent-template` scaffold: the **agent-first introspection CLI** (cited
-from [teken](https://github.com/agentculture/teken)'s `afi-cli` `python-cli`
-reference) with verbs `whoami` / `learn` / `explain` / `overview` / `doctor`
-plus the `cli` noun group. Runtime third-party dependencies are **zero**
-(`dependencies = []`) as of M0; `teken` is dev-only. That changes at M2: per
-the 2026-08-07 user decision (spec claim c8), Playwright becomes a **core**
-runtime dependency rather than a declared extra — see point 8 below for what
-stays dependency-light regardless.
+**The M0-M2 slice of the product is real and shipped.** Beyond the
+**agent-first introspection CLI** (cited from
+[teken](https://github.com/agentculture/teken)'s `afi-cli` `python-cli`
+reference — `whoami` / `learn` / `explain` / `overview` / `doctor` plus the
+`cli` noun group), this repo ships the `search`, `page`, `action`, and
+`session` nouns: a real headless Chromium backend (Playwright, a **core**
+runtime dependency since M2 — the 2026-08-07 user decision, spec claim c8,
+overriding issue #1 section 12's declared-extra recommendation), an explicit
+policy-profile mechanism for authorizing a declared app under test, and
+file-backed sessions that survive between separate one-shot CLI invocations.
+`search` needs `$WEBGLASS_BRAVE_API_KEY`; without one it reports a structured
+`backend_unavailable` result rather than pretending to work. What is **not**
+built yet: the durable evidence store, the exploration graph, Web-memory, the
+Colleague library provider, and everything past `action press`/`follow`
+(fill/select/submit/download/upload, and any *applied* — not merely
+previewed — remote action). All of that is tracked in
+[issue #8](https://github.com/agentculture/webglass-cli/issues/8) as the
+post-M2 milestones (M3-M6 below). Don't infer a capability from `webglass
+learn`'s command map alone — its `status`/`status_detail` fields (and this
+file) say precisely which nouns are live.
 
 So keep two layers straight:
 
 - **The CLI skeleton** (below) — registration / error / output / explain
   machinery. Real, tested, and the foundation every WebGlass noun registers onto.
-- **The WebGlass product** (issue #1, summarized below) — the target
-  architecture, which is an *operation contract*, not a verb list.
+- **The WebGlass product** (issue #1, summarized below) — M0-M2 (search/page/
+  action/session) is shipped; M3 onward is still the target architecture, an
+  *operation contract* rather than a built verb list.
 
-Much of the runtime *text* still calls this repo "a clonable template for
-AgentCulture mesh agents" (the `learn` body, the `explain` root entry in
-`webglass/explain/catalog.py`, the argparse `prog` description in
-`webglass/cli/__init__.py:74`, `README.md`). Those strings are the CLI's own
-documentation surface — update them as real WebGlass nouns land.
+Every runtime text surface that describes overall status — `learn` (text and
+JSON), the `explain` root entry in `webglass/explain/catalog.py`, and
+`README.md` — is required to say the same thing this paragraph does, and to
+stay current in the same PR that ships the next milestone (an earlier version
+of this repo called itself "a clonable template for AgentCulture mesh
+agents" in all of those places; that language is gone as of the M0-M2 status
+pass — if you find it again, that is drift, not a live warning).
 
 ## Commands
 
@@ -322,6 +336,28 @@ and never execute them; uploads only from opaque artifact references; redact
 credentials/tokens/cookies from logs and evidence; expose TLS, bot-wall,
 login-wall, and blocked-content conditions explicitly.
 
+**Known deviation (d1, tracked in
+[issue #10](https://github.com/agentculture/webglass-cli/issues/10)):**
+"revalidate every redirect hop" is honest but the *mechanism* shipped at M2 is
+**post-hoc containment, not in-line blocking**. Playwright's route
+interception is not re-invoked for auto-followed redirect targets (verified
+against a two-hop local fixture chain during t11): the adapter policy-checks
+only the requested URL before navigation (so a denied *target* is never
+contacted), then stamps every navigation that actually redirected under a
+policy with `UNREVALIDATED_REDIRECTS_WARNING`
+(`webglass/adapters/playwright.py`) — a degraded-evidence disclosure that the
+intermediate hops were followed before anyone checked them. Separately, the
+operation service (`_check_navigation` in `webglass/service.py`) re-evaluates
+every *returned* hop after the fact and blocks/denies the whole result if any
+of them turns out disallowed, so content behind a smuggled hop is never
+disclosed to the caller — but the browser may already have **contacted** that
+intermediate hop before the after-the-fact denial lands: disclosure is
+contained, network contact is not. In-line per-hop enforcement needs a
+policy-enforcing local proxy the browser is pointed at (a separately
+designed, M3-adjacent component) — until that lands, treat "every hop is
+checked" as true for what the caller *sees*, not yet for what the browser
+*touches*.
+
 ### 8. Policy, persistence, and the replaceable adapter
 
 **Policy** is evaluated by WebGlass (only it understands URLs, redirects,
@@ -378,6 +414,10 @@ webglass/
 ```
 
 ### 10. Delivery sequence — do not skip M0
+
+**Status: M0, M1, and M2 are shipped.** M3 onward is tracked in
+[issue #8](https://github.com/agentculture/webglass-cli/issues/8) and not yet
+built — the descriptions below stay in future tense for M3+ on purpose.
 
 - **M0 — contract and characterization.** Characterization-test the current CLI,
   JSON/error, explain, identity, and exit-code contracts. Decide operation and
