@@ -265,6 +265,12 @@ INSPECT_LENSES: frozenset[str] = frozenset(
 
 _TEXT_LIMIT = 200
 
+#: Human names for the two adapters most operations require. They reach the
+#: caller inside ``backend_unavailable`` messages, so each is named once and
+#: reused --- the wording must not drift between call sites.
+_SESSION_STORE_LABEL = "session store"
+_BROWSER_BACKEND_LABEL = "browser backend"
+
 
 def _sanitize(text: object, limit: int = _TEXT_LIMIT) -> str:
     """Make backend/exception text safe to embed in WebGlass-authored prose.
@@ -810,7 +816,7 @@ class WebGlassService:
         ledger = self.ledger_for(context)
         deadline = self._deadline(operation, run.started_at)
         try:
-            self._preflight(run, ledger, cancel, deadline)
+            self._preflight(run, cancel, deadline)
             self._handlers[OperationKind(operation.kind)](run, ledger, cancel, deadline)
             lifecycle: LifecycleState = LifecycleState.SUCCEEDED
             error: OperationError | None = None
@@ -881,7 +887,6 @@ class WebGlassService:
     def _preflight(
         self,
         run: _Run,
-        ledger: BudgetLedger,
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
@@ -1122,7 +1127,7 @@ class WebGlassService:
         return f"{context.caller}:{context.task}"
 
     def _require_session(self, run: _Run, session_id: str, *, lease: bool) -> SessionRecord:
-        store: SessionStore = self._require(self.sessions, "session store", "sessions")
+        store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         record = store.get(session_id)
         if record is None:
             raise _Halt(
@@ -1194,7 +1199,7 @@ class WebGlassService:
 
     # -- reference helpers --------------------------------------------------
 
-    def _entry(self, run: _Run, snapshot_id: str) -> SnapshotEntry:
+    def _entry(self, snapshot_id: str) -> SnapshotEntry:
         entry = self.snapshots.get(snapshot_id)
         if entry is None:
             raise _Halt(
@@ -1347,7 +1352,7 @@ class WebGlassService:
         policy-checked exactly like a caller-supplied URL — a page cannot widen
         policy by putting a private-network href in an anchor.
         """
-        entry = self._entry(run, self._require_page_ref(run))
+        entry = self._entry(self._require_page_ref(run))
         element_ref = str(self._arg(run, "link", default=run.operation.target.element_ref) or "")
         if not element_ref:
             raise _Halt(
@@ -1381,7 +1386,7 @@ class WebGlassService:
         *,
         url: str,
     ) -> None:
-        browser: BrowserBackend = self._require(self.browser, "browser backend", "browser")
+        browser: BrowserBackend = self._require(self.browser, _BROWSER_BACKEND_LABEL, "browser")
         run.backend = self._backend_label(browser)
         session_id, session_info = self._session_for_navigation(run)
         run.trusted["session"] = session_info
@@ -1584,14 +1589,14 @@ class WebGlassService:
         as "lens whatever that session happens to be showing now".
         """
         if run.operation.target.page_ref:
-            return self._entry(run, run.operation.target.page_ref)
+            return self._entry(run.operation.target.page_ref)
         if run.operation.target.url:
             self._open(run, ledger, cancel, deadline, url=run.operation.target.url)
             if run.entry is not None:
                 return run.entry
         if run.operation.session_id:
             return self._live_entry(run, ledger, cancel, deadline)
-        return self._entry(run, self._require_page_ref(run))
+        return self._entry(self._require_page_ref(run))
 
     def _live_entry(
         self,
@@ -1623,7 +1628,7 @@ class WebGlassService:
           fallback to a navigation, which would be a semantically different
           operation.
         """
-        browser: BrowserBackend = self._require(self.browser, "browser backend", "browser")
+        browser: BrowserBackend = self._require(self.browser, _BROWSER_BACKEND_LABEL, "browser")
         run.backend = self._backend_label(browser)
         session_id = str(run.operation.session_id)
         self._require_session(run, session_id, lease=True)
@@ -1960,7 +1965,7 @@ class WebGlassService:
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
-        browser: BrowserBackend = self._require(self.browser, "browser backend", "browser")
+        browser: BrowserBackend = self._require(self.browser, _BROWSER_BACKEND_LABEL, "browser")
         store: ArtifactStore = self._require(self.artifacts, "artifact store", "artifacts")
         run.backend = self._backend_label(browser)
         if run.operation.target.url:
@@ -2068,7 +2073,7 @@ class WebGlassService:
         body runs exclusively under a declared override (see
         :func:`default_effect_class`).
         """
-        browser: BrowserBackend = self._require(self.browser, "browser backend", "browser")
+        browser: BrowserBackend = self._require(self.browser, _BROWSER_BACKEND_LABEL, "browser")
         run.backend = self._backend_label(browser)
         keys = self._arg(run, "keys", required=True)
         if isinstance(keys, str):
@@ -2099,7 +2104,7 @@ class WebGlassService:
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
-        store: SessionStore = self._require(self.sessions, "session store", "sessions")
+        store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
         now = self.clock.now()
         ttl = float(self._arg(run, "ttl_seconds", default=DEFAULT_SESSION_TTL_SECONDS))
@@ -2131,7 +2136,7 @@ class WebGlassService:
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
-        store: SessionStore = self._require(self.sessions, "session store", "sessions")
+        store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
         # Only the caller's own sessions: a shared store must not become a
         # directory of other callers' live browsers.
@@ -2146,7 +2151,7 @@ class WebGlassService:
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
-        store: SessionStore = self._require(self.sessions, "session store", "sessions")
+        store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
         record = self._require_session(run, self._session_argument(run, "show"), lease=False)
         run.trusted["session"] = record.to_public_dict()
@@ -2158,7 +2163,7 @@ class WebGlassService:
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
-        store: SessionStore = self._require(self.sessions, "session store", "sessions")
+        store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
         session_id = self._session_argument(run, "close")
         self._require_session(run, session_id, lease=False)
@@ -2178,7 +2183,7 @@ class WebGlassService:
         cancel: CancellationToken | threading.Event | None,
         deadline: float | None,
     ) -> None:
-        store: SessionStore = self._require(self.sessions, "session store", "sessions")
+        store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
         reaped = store.clean(self.clock.now())
         mine = [record for record in reaped if record.caller == run.context.caller]

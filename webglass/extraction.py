@@ -309,13 +309,28 @@ class _DocumentParser(HTMLParser):
                 self._skip_depth += 1
             return
         if tag in _SKIP_TAGS:
-            self._flush()
-            self._skip_tag = tag
-            self._skip_depth = 1
-            self.non_content_elements += 1
+            self._enter_skip(tag)
             return
 
         attributes = {name: (value or "") for name, value in attrs}
+        self._note_document_metadata(tag, attributes)
+        # The tag groups below are disjoint, so the first handler that claims
+        # the tag is the only one that could have.
+        if self._start_control(tag, attributes):
+            return
+        if self._start_structure(tag):
+            return
+        if tag not in _INLINE_TAGS:
+            self._flush()
+
+    def _enter_skip(self, tag: str) -> None:
+        self._flush()
+        self._skip_tag = tag
+        self._skip_depth = 1
+        self.non_content_elements += 1
+
+    def _note_document_metadata(self, tag: str, attributes: Mapping[str, str]) -> None:
+        """Document-level identity a tag may carry, independent of block flow."""
         if tag == "html":
             self.language = attributes.get("lang") or self.language
         elif tag == "link" and attributes.get("rel", "").lower() == "canonical":
@@ -323,91 +338,107 @@ class _DocumentParser(HTMLParser):
         elif tag == "br":
             self._buffer.append(" ")
 
+    def _start_control(self, tag: str, attributes: Mapping[str, str]) -> bool:
+        """Open a control, link or form; ``True`` when the tag was claimed."""
         if tag in _CONTROL_TEXT_TAGS:
             self._open_control(tag, attributes)
-            return
-        if tag == "a":
+        elif tag == "a":
             self._open_anchor(attributes)
-            return
+        elif tag == "form":
+            self._open_form(attributes)
+        elif tag in ("input", "select"):
+            self._add_control(tag, attributes)
+        else:
+            return False
+        return True
+
+    def _start_structure(self, tag: str) -> bool:
+        """Open a block-structure tag; ``True`` when the tag was claimed."""
         if tag in _HEADING_TAGS:
             self._open_leaf(tag, "heading", _HEADING_TAGS[tag])
-            return
-        if tag in _PARAGRAPH_TAGS:
+        elif tag in _PARAGRAPH_TAGS:
             self._open_leaf(tag, "paragraph")
-            return
-        if tag == "pre":
+        elif tag == "pre":
             self._open_leaf(tag, "code")
-            return
-        if tag == "li":
+        elif tag == "li":
             self._open_leaf(tag, "item")
-            return
-        if tag in ("td", "th"):
+        elif tag in ("td", "th"):
             self._open_leaf(tag, "cell")
-            return
-        if tag in ("ul", "ol"):
+        elif tag in ("ul", "ol"):
             self._flush()
             self._list_depth += 1
-            return
-        if tag == "table":
+        elif tag == "table":
             self._flush()
             self._table_depth += 1
-            return
-        if tag == "tr":
+        elif tag == "tr":
             self._flush()
-            return
-        if tag == "form":
-            self._open_form(attributes)
-            return
-        if tag in ("input", "select"):
-            self._add_control(tag, attributes)
-            return
-        if tag in _CHROME_TAGS:
+        elif tag in _CHROME_TAGS:
             self._flush()
             self._chrome_stack.append(tag)
+        else:
+            return False
+        return True
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._skip_depth:
+            self._exit_skip(tag)
+            return
+        if tag in _VOID_TAGS:
+            return
+        if self._close_control_like(tag):
+            return
+        if self._close_structure(tag):
+            return
+        if self._close_section(tag):
             return
         if tag not in _INLINE_TAGS:
             self._flush()
 
-    def handle_endtag(self, tag: str) -> None:
-        if self._skip_depth:
-            if tag == self._skip_tag:
-                self._skip_depth -= 1
-                if self._skip_depth == 0:
-                    self._skip_tag = None
+    def _exit_skip(self, tag: str) -> None:
+        if tag != self._skip_tag:
             return
-        if tag in _VOID_TAGS:
-            return
+        self._skip_depth -= 1
+        if self._skip_depth == 0:
+            self._skip_tag = None
+
+    def _close_control_like(self, tag: str) -> bool:
+        """Close an open control or anchor; ``True`` when the tag was claimed."""
         if self._control_stack and self._control_stack[-1][0] == tag:
             self._close_control()
-            return
+            return True
         if tag == "a":
             self._close_anchor()
-            return
+            return True
+        return False
+
+    def _close_structure(self, tag: str) -> bool:
+        """Close a block-structure tag; ``True`` when the tag was claimed."""
         if tag in _HEADING_TAGS or tag in _PARAGRAPH_TAGS or tag in ("pre", "li", "td", "th"):
             self._close_leaf(tag)
-            return
-        if tag == "tr":
+        elif tag == "tr":
             self._flush()
             self._close_row()
-            return
-        if tag in ("ul", "ol"):
+        elif tag in ("ul", "ol"):
             self._close_list()
-            return
-        if tag == "table":
+        elif tag == "table":
             self._close_table()
-            return
+        else:
+            return False
+        return True
+
+    def _close_section(self, tag: str) -> bool:
+        """Close a form or a chrome landmark; ``True`` when the tag was claimed."""
         if tag == "form":
             self._flush()
             if self._form_stack:
                 self._form_stack.pop()
-            return
+            return True
         if tag in _CHROME_TAGS:
             self._flush()
             if self._chrome_stack and self._chrome_stack[-1] == tag:
                 self._chrome_stack.pop()
-            return
-        if tag not in _INLINE_TAGS:
-            self._flush()
+            return True
+        return False
 
     def close(self) -> None:
         super().close()
@@ -576,8 +607,12 @@ _INLINE_TAGS = frozenset(
 # --- public API --------------------------------------------------------------
 
 
-def extract_page(
-    html: str,
+# S107 (too many parameters) is deliberately suppressed on the signature below:
+# every keyword is identity the document cannot know and the caller must inject
+# (see the docstring). Collapsing them into a parameter object would break the
+# public API and hide which pieces of identity a caller actually supplied.
+def extract_page(  # NOSONAR(S107)
+    html: str,  # NOSONAR(S107)
     *,
     snapshot_id: str,
     requested_url: str,
@@ -862,30 +897,37 @@ def _parse_selector(selector: str) -> _Selector:
         )
     position = 0
     tag: str | None = None
-    element_id: str | None = None
-    classes: list[str] = []
-    attributes: list[tuple[str, str | None]] = []
 
     match = _SEL_TAG_RE.match(text)
     if match:
         tag = match.group(0).lower()
         position = match.end()
 
+    element_id, classes, attributes = _scan_selector_components(text, position, selector)
+
+    # No "nothing matched" case can reach here: the scanner either consumes a
+    # component or raises, and an empty/padded selector was rejected above.
+    return _Selector(tag, element_id, tuple(classes), tuple(attributes))
+
+
+def _scan_selector_components(
+    text: str, position: int, selector: str
+) -> tuple[str | None, list[str], list[tuple[str, str | None]]]:
+    """Consume ``#id`` / ``.class`` / ``[attr]`` components after the tag."""
+    element_id: str | None = None
+    classes: list[str] = []
+    attributes: list[tuple[str, str | None]] = []
+
     while position < len(text):
         char = text[position]
         if char in "#.":
-            name = _SEL_NAME_RE.match(text, position + 1)
-            if name is None:
-                raise SelectorSyntaxError(
-                    f"malformed selector {selector!r}", remediation=_SUPPORTED_FORMS
-                )
+            name = _scan_component_name(text, position, selector)
             if char == "#":
                 element_id = name.group(0)
             else:
                 classes.append(name.group(0))
             position = name.end()
-            continue
-        if char == "[":
+        elif char == "[":
             end = text.find("]", position)
             if end == -1:
                 raise SelectorSyntaxError(
@@ -894,15 +936,21 @@ def _parse_selector(selector: str) -> _Selector:
                 )
             attributes.append(_parse_attribute(text[position + 1 : end], selector))
             position = end + 1
-            continue
-        raise SelectorSyntaxError(
-            f"unsupported selector syntax at {char!r} in {selector!r}",
-            remediation=_SUPPORTED_FORMS,
-        )
+        else:
+            raise SelectorSyntaxError(
+                f"unsupported selector syntax at {char!r} in {selector!r}",
+                remediation=_SUPPORTED_FORMS,
+            )
 
-    # No "nothing matched" case can reach here: the scanner either consumes a
-    # component or raises, and an empty/padded selector was rejected above.
-    return _Selector(tag, element_id, tuple(classes), tuple(attributes))
+    return element_id, classes, attributes
+
+
+def _scan_component_name(text: str, position: int, selector: str) -> re.Match[str]:
+    """Read the name after a ``#`` or ``.``; a missing one is a syntax error."""
+    name = _SEL_NAME_RE.match(text, position + 1)
+    if name is None:
+        raise SelectorSyntaxError(f"malformed selector {selector!r}", remediation=_SUPPORTED_FORMS)
+    return name
 
 
 def _parse_attribute(body: str, selector: str) -> tuple[str, str | None]:
@@ -987,7 +1035,9 @@ class _SelectorParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag in _VOID_TAGS:
             return
-        for capture in list(self._active):
+        # NOSONAR(S7504): the list() is a snapshot, not a redundant conversion
+        # -- _finish() removes the capture from self._active as we iterate.
+        for capture in list(self._active):  # NOSONAR(S7504): mutated while iterated
             if capture["depth"] == len(self._stack) and capture["tag"] == tag:
                 self._finish(capture)
         if tag in self._stack:
@@ -997,7 +1047,8 @@ class _SelectorParser(HTMLParser):
 
     def close(self) -> None:
         super().close()
-        for capture in list(self._active):
+        # NOSONAR(S7504): snapshot copy -- _finish() mutates self._active.
+        for capture in list(self._active):  # NOSONAR(S7504): mutated while iterated
             self._finish(capture)
         self.matches.sort(key=lambda match: match.source_order)
 

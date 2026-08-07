@@ -20,7 +20,7 @@
         window.__webglassKeyLog.push(event.key);
         var state = JSON.stringify(window.__webglassKeyLog);
         var node = document.getElementById("keylog");
-        node.setAttribute("data-fixture-state", state);
+        node.dataset.fixtureState = state;
         node.textContent = window.__webglassKeyLog.join(",");
       });
     </script>

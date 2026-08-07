@@ -109,12 +109,18 @@ class ReferenceSyntaxError(SnapshotReferenceError, ValueError):
 
 # A snapshot id must never contain the delimiters of the qualified form, or
 # ``snap@1/block:2`` would stop round-tripping.
+#
+# ``re.ASCII`` is load-bearing below: it keeps ``\d`` meaning exactly
+# ``[0-9]``. Plain ``\d`` would also accept non-ASCII decimal digits, so
+# ``link:٣`` would parse as index 3 -- a second spelling of a reference that
+# no longer round-trips through ``str(ref)``.
 _SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_SHORT_RE = re.compile(r"^(?P<kind>[a-z]+):(?P<index>[0-9]+)$")
+_SHORT_RE = re.compile(r"^(?P<kind>[a-z]+):(?P<index>\d+)$", re.ASCII)
 _QUALIFIED_RE = re.compile(
     r"^(?P<snapshot_id>[A-Za-z0-9][A-Za-z0-9._-]*)"
-    r"@(?P<generation>[0-9]+)"
-    r"/(?P<kind>[a-z]+):(?P<index>[0-9]+)$"
+    r"@(?P<generation>\d+)"
+    r"/(?P<kind>[a-z]+):(?P<index>\d+)$",
+    re.ASCII,
 )
 
 

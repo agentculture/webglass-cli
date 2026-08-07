@@ -613,7 +613,9 @@ class PlaywrightBrowserBackend:
         is precisely what lets a later process reattach and find its pages
         intact. Killing a browser is :meth:`DetachedBrowser.terminate`.
         """
-        for session_id in list(self._sessions):
+        # NOSONAR(S7504): the list() is a snapshot, not a redundant conversion
+        # -- _release() pops from self._sessions as we iterate it.
+        for session_id in list(self._sessions):  # NOSONAR(S7504): mutated while iterated
             self._release(session_id)
 
     def _release(self, session_id: str) -> None:

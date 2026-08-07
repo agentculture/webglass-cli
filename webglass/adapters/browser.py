@@ -354,7 +354,15 @@ class FakeBrowserBackend:
                 page_errors=route.page_errors,
             )
 
-    def press(self, session_id: str, keys: Sequence[str], delay_ms: float = 0) -> PressResult:
+    def press(
+        self,
+        session_id: str,
+        keys: Sequence[str],
+        # NOSONAR(S1172): part of the BrowserBackend protocol signature -- an
+        # in-memory fake has nothing to delay, but dropping the parameter
+        # would stop this adapter conforming to the seam it stands in for.
+        delay_ms: float = 0,  # NOSONAR(S1172)
+    ) -> PressResult:
         state = self._state(session_id)
         pressed = tuple(keys)
         state.key_log.extend(pressed)
@@ -423,34 +431,60 @@ def is_decodable_png(data: bytes) -> bool:
     """
     if not data.startswith(_PNG_SIGNATURE):
         return False
+    walked = _walk_png_chunks(data)
+    if walked is None:
+        return False
+    chunk_types, idat_payload = walked
+    if not chunk_types or chunk_types[0] != b"IHDR" or chunk_types[-1] != b"IEND":
+        return False
+    if b"IDAT" not in chunk_types:
+        return False
+    try:
+        zlib.decompress(idat_payload)
+    except (zlib.error, ValueError):
+        return False
+    return True
+
+
+def _walk_png_chunks(data: bytes) -> tuple[list[bytes], bytes] | None:
+    """Walk the chunk stream after the signature, or ``None`` if it is malformed.
+
+    Returns the chunk types in file order plus the concatenated ``IDAT``
+    payload; whether that sequence is a *valid* PNG is the caller's judgement.
+    """
     offset = len(_PNG_SIGNATURE)
     chunk_types: list[bytes] = []
     idat_payload = bytearray()
-    try:
-        while offset < len(data):
-            if offset + 8 > len(data):
-                return False
-            (length,) = struct.unpack(">I", data[offset : offset + 4])
-            chunk_type = data[offset + 4 : offset + 8]
-            data_start = offset + 8
-            data_end = data_start + length
-            chunk_data = data[data_start:data_end]
-            if len(chunk_data) != length:
-                return False
-            (crc,) = struct.unpack(">I", data[data_end : data_end + 4])
-            if zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF != crc:
-                return False
-            chunk_types.append(chunk_type)
-            if chunk_type == b"IDAT":
-                idat_payload.extend(chunk_data)
-            offset = data_end + 4
-            if chunk_type == b"IEND":
-                break
-        if not chunk_types or chunk_types[0] != b"IHDR" or chunk_types[-1] != b"IEND":
-            return False
-        if b"IDAT" not in chunk_types:
-            return False
-        zlib.decompress(bytes(idat_payload))
-    except (struct.error, zlib.error, ValueError):
-        return False
-    return True
+    while offset < len(data):
+        chunk = _read_png_chunk(data, offset)
+        if chunk is None:
+            return None
+        chunk_type, chunk_data, offset = chunk
+        chunk_types.append(chunk_type)
+        if chunk_type == b"IDAT":
+            idat_payload.extend(chunk_data)
+        if chunk_type == b"IEND":
+            break
+    return chunk_types, bytes(idat_payload)
+
+
+def _read_png_chunk(data: bytes, offset: int) -> tuple[bytes, bytes, int] | None:
+    """Read one length/type/payload/CRC chunk, or ``None`` if it does not check out.
+
+    Every bound is verified before it is used, so a truncated or corrupt
+    stream returns ``None`` rather than raising out of the walk. Returns the
+    chunk type, its payload, and the offset the next chunk starts at.
+    """
+    if offset + 8 > len(data):
+        return None
+    (length,) = struct.unpack(">I", data[offset : offset + 4])
+    chunk_type = data[offset + 4 : offset + 8]
+    data_start = offset + 8
+    data_end = data_start + length
+    if data_end + 4 > len(data):
+        return None
+    chunk_data = data[data_start:data_end]
+    (crc,) = struct.unpack(">I", data[data_end : data_end + 4])
+    if zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF != crc:
+        return None
+    return chunk_type, chunk_data, data_end + 4
