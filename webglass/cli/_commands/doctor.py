@@ -8,19 +8,33 @@ Mirrors the two invariants ``steward doctor`` verifies for a mesh agent:
   (``claude`` → ``CLAUDE.md``, ``colleague`` → ``AGENTS.colleague.md``,
   ``acp`` → ``AGENTS.md``, ``gemini`` → ``GEMINI.md``).
 
-Plus a **skills-present** check (the vendored ``.claude/skills/`` kit). Read-only.
+Plus a **skills-present** check (the vendored ``.claude/skills/`` kit), and —
+build plan task t14 — five **browser-capability** checks from
+:mod:`webglass.cli._browser_doctor`: ``playwright_importable``,
+``chromium_installed``, ``playwright_version``, ``usable_sandbox``, and
+``state_dir_writable``. All identity/skills checks are read-only; the browser
+checks are read-only too — none of them ever launches a browser.
 
 Reports the rubric-shaped contract
 ``{healthy, checks: [{id, passed, severity, message, remediation}]}`` so the
 agent-first rubric's bundle 7 passes. When run from a wheel install (no
 ``culture.yaml`` alongside the package), it reports a single info check and
-exits 0 — there is nothing to diagnose.
+exits 0 — there is nothing to diagnose (this also skips the browser checks;
+see ``tests/test_characterization.py``'s
+``test_diagnose_reports_source_checkout_info_when_no_culture_yaml``, which
+pins that single-check shape exactly).
+
+``healthy`` stays a plain ``all(check["passed"] for check in checks)`` — see
+:mod:`webglass.cli._browser_doctor`'s module docstring for why the new
+checks report ``passed=True`` for every severity except ``error`` rather than
+this function branching on severity itself.
 """
 
 from __future__ import annotations
 
 import argparse
 
+from webglass.cli._browser_doctor import browser_checks
 from webglass.cli._commands.whoami import find_culture_yaml, read_agent_fields
 from webglass.cli._output import emit_result
 
@@ -94,6 +108,12 @@ def _diagnose() -> dict[str, object]:
         }
     )
 
+    # t14: browser-capability checks. Independent of the identity checks
+    # above (a broken prompt-file/backend invariant says nothing about
+    # whether this host can run Chromium), so they always run once we know
+    # there is a culture.yaml to diagnose against at all.
+    checks.extend(browser_checks())
+
     healthy = all(c["passed"] for c in checks)
     return {"healthy": healthy, "checks": checks}
 
@@ -109,7 +129,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for check in report["checks"]:
             mark = "ok" if check["passed"] else "FAIL"
             lines.append(f"[{mark}] {check['id']}: {check['message']}")
-            if not check["passed"] and check["remediation"]:
+            # Shown whenever there is something actionable, not only on
+            # failure: a warning/info check (e.g. chromium_installed on a
+            # browserless host) reports passed=True but can still carry a
+            # real remediation — see _browser_doctor's module docstring.
+            if check["remediation"]:
                 lines.append(f"  hint: {check['remediation']}")
         emit_result("\n".join(lines), json_mode=False)
     return 0 if report["healthy"] else 1
@@ -118,7 +142,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def register(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser(
         "doctor",
-        help="Check the agent-identity invariants (prompt-file-present, backend-consistency).",
+        help=(
+            "Check the agent-identity invariants (prompt-file-present, "
+            "backend-consistency) plus browser-capability diagnostics."
+        ),
     )
     p.add_argument("--json", action="store_true", help="Emit structured JSON.")
     p.set_defaults(func=cmd_doctor)

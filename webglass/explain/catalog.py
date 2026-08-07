@@ -120,7 +120,16 @@ _DOCTOR = """\
 
 Checks the agent-identity invariants `steward doctor` verifies:
 prompt-file-present and backend-consistency (`colleague` → `AGENTS.colleague.md`), plus a
-skills-present check. Exits 1 when unhealthy.
+skills-present check. Also runs five browser-capability checks:
+`playwright_importable` (error severity — Playwright is a core runtime
+dependency), `chromium_installed`, `playwright_version` (installed version
+plus the pinned range), `usable_sandbox` (probes
+`/proc/sys/kernel/apparmor_restrict_unprivileged_userns` and
+`unprivileged_userns_clone` — never attempts `--no-sandbox`), and
+`state_dir_writable`. The last four are advisory (`warning`/`info`
+severity): a host that simply lacks a browser or a usable sandbox is reported
+with actionable remediation but stays healthy. Exits 1 only when an identity
+check or `playwright_importable` fails.
 
 ## Usage
 
