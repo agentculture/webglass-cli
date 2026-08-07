@@ -30,6 +30,10 @@ _VERBS = [
     "explain <path> — markdown docs for a topic",
     "overview — this descriptive snapshot",
     "doctor — check the agent-identity invariants",
+    "search <query> — run a search operation (M1: needs a search backend)",
+    "page overview — open/read/inspect/extract/links/screenshot one page",
+    "action overview — follow a link or press keys",
+    "session overview — create/list/show/close/clean browser sessions",
 ]
 
 
