@@ -353,7 +353,8 @@ def test_p2_malformed_policy_error_is_structured(data: Any) -> None:
     assert isinstance(evaluator.error, PolicyError)
     payload = evaluator.error.to_dict()
     assert payload["rule_id"] == "policy-malformed"
-    assert isinstance(payload["message"], str) and payload["message"]
+    assert isinstance(payload["message"], str)
+    assert payload["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -397,13 +398,16 @@ def test_p4_every_verdict_cites_at_least_one_declared_rule(url: str) -> None:
 @pytest.mark.parametrize("url", ALL_URLS, ids=str)
 def test_p4_evaluation_is_deterministic(url: str) -> None:
     evaluator = WebPolicyEvaluator()
-    assert evaluator.evaluate(url) == evaluator.evaluate(url)
+    first = evaluator.evaluate(url)
+    second = evaluator.evaluate(url)
+    assert first == second
 
 
 @pytest.mark.parametrize("url", ALL_URLS, ids=str)
 def test_p4_reason_text_stays_single_line_and_bounded(url: str) -> None:
     reason = WebPolicyEvaluator().evaluate(url).reason
-    assert "\n" not in reason and "\r" not in reason
+    assert "\n" not in reason
+    assert "\r" not in reason
     assert len(reason) < 500
 
 

@@ -10,6 +10,8 @@ reference is applied outside the snapshot generation that issued it.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from webglass.references import (
@@ -136,7 +138,7 @@ def test_negative_index_and_generation_are_rejected() -> None:
 def test_ref_is_frozen_and_hashable() -> None:
     ref = SnapshotRef(SNAP_A, 0, RefKind.BLOCK, 1)
     assert {ref, SnapshotRef(SNAP_A, 0, RefKind.BLOCK, 1)} == {ref}
-    with pytest.raises(Exception):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         ref.index = 2  # type: ignore[misc]
 
 
@@ -169,7 +171,8 @@ def test_stale_error_names_both_scopes_and_carries_a_remediation() -> None:
     error = excinfo.value
     text = str(error)
     assert "snap-a@0/block:3" in text
-    assert SNAP_B in text and "2" in text
+    assert SNAP_B in text
+    assert "2" in text
     assert error.remediation
     assert error.ref == ref
 
