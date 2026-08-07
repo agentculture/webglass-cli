@@ -537,10 +537,11 @@ def test_nested_noun_argparse_errors_use_the_structured_contract(
 
 
 # ---------------------------------------------------------------------------
-# Session verbs against the real (unmocked) default factory: within-process
-# persistence via the module-level InMemorySessionStore singleton, across
-# repeated main([...]) calls in one process — cross-invocation persistence
-# across separate CLI subprocesses is build plan task t12.
+# Session verbs against the real (unmocked) default factory, across repeated
+# main([...]) calls in one process. Since build plan t12 the default store is
+# the on-disk FileSessionStore, so the same flow also holds across separate
+# CLI subprocesses — that half is characterized in
+# tests/test_session_persistence.py.
 # ---------------------------------------------------------------------------
 
 
@@ -687,7 +688,11 @@ def test_session_list_text_mode_shows_the_backend_line(
     assert rc == 0
     out = capsys.readouterr().out
     assert "session.list: succeeded" in out
-    assert "backend: InMemorySessionStore" in out
+    # The default store became the on-disk FileSessionStore at build plan t12
+    # (cross-invocation sessions, spec claim c29); the *contract* this test
+    # characterizes — that a session verb names the store it ran against on
+    # its backend line — is unchanged.
+    assert "backend: FileSessionStore" in out
 
 
 def test_page_open_text_mode_sections_untrusted_content_and_policy_decision(

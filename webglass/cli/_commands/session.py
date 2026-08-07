@@ -1,12 +1,13 @@
 """``webglass session`` — create/list/show/close/clean browser sessions.
 
-M1 uses :class:`webglass.sessions.InMemorySessionStore`, a **process-local**
-store (see :mod:`webglass.cli._factory`'s module docstring): ``session
-create`` in one ``webglass`` invocation is visible to ``session show``/
-``session close`` in a later invocation of the *same process* (exactly what
-this module's tests exercise via repeated ``main([...])`` calls), but not
-across separate CLI subprocesses — cross-invocation persistence is build plan
-task t12's on-disk ``FileSessionStore``.
+Sessions are backed by
+:class:`webglass.adapters.session_store.FileSessionStore` (wired in
+:mod:`webglass.cli._factory`): ``session create`` in one ``webglass`` process
+is visible to ``session show``/``page open --session-id ...``/``session
+close`` in a *separate* later process, because the record — including the
+browser's connect endpoint — lives in a ``0600`` file under the per-user
+state directory. With a browser backend configured, ``create`` launches a
+detached Chromium and ``close``/``clean`` terminate it.
 
 Every handler here only builds a :class:`~webglass.operations.WebOperation`
 and renders the result — see CLAUDE.md's CLI skeleton section, "no operation
@@ -35,10 +36,28 @@ _OVERVIEW_SECTIONS = [
         ],
     },
     {
-        "title": "Persistence status",
+        "title": "Persistence",
         "items": [
-            "M1: sessions live in an in-memory, per-process store — they do not survive "
-            "past this CLI process. Cross-invocation persistence lands at build plan t12.",
+            "Sessions persist on disk under $WEBGLASS_STATE_DIR, else "
+            "$XDG_STATE_HOME/webglass, else ~/.local/state/webglass — one 0600 record "
+            "per session in a 0700 directory, so a session created by one CLI process "
+            "is usable by the next.",
+            "The connect endpoint stored in that record is secret-equivalent: it never "
+            "appears in JSON output, text output, logs, or evidence.",
+            "Concurrent use is serialized by a lease: a second holder gets a structured "
+            "refusal rather than sharing one live browser, and a crashed holder's lease "
+            "frees itself at expiry.",
+            "session clean reaps expired sessions, terminates their browser processes, "
+            "and removes their profile directories.",
+        ],
+    },
+    {
+        "title": "Browser status",
+        "items": [
+            "session create launches a real detached browser only when a browser backend "
+            "is configured (WEBGLASS_BROWSER_BACKEND=playwright); otherwise it records a "
+            "session without one. Making the browser the default is build plan t13, which "
+            "owns the page/action verbs.",
         ],
     },
 ]
