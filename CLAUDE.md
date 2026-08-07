@@ -50,7 +50,10 @@ providers; neither becomes the other's god object.
 from [teken](https://github.com/agentculture/teken)'s `afi-cli` `python-cli`
 reference) with verbs `whoami` / `learn` / `explain` / `overview` / `doctor`
 plus the `cli` noun group. Runtime third-party dependencies are **zero**
-(`dependencies = []`); `teken` is dev-only.
+(`dependencies = []`) as of M0; `teken` is dev-only. That changes at M2: per
+the 2026-08-07 user decision (spec claim c8), Playwright becomes a **core**
+runtime dependency rather than a declared extra — see point 8 below for what
+stays dependency-light regardless.
 
 So keep two layers straight:
 
@@ -341,12 +344,25 @@ Playwright types out of the public API behind protocols: `SearchProvider`,
 `FetchBackend`, `BrowserBackend`, `BrowserSessionStore`, `MemoryStore`,
 `ArtifactStore`, `WebPolicyEvaluator`, plus injectable `Clock`/ID providers for
 deterministic tests. Keep operation models, policy, extraction, evidence,
-memory, and CLI plumbing dependency-light and expose Playwright as a **declared
-runtime extra or adapter package** — this repo's `dependencies = []` is a real
-property worth defending. Provide `doctor` / browser-install diagnostics, pin and
-report compatible versions, fail with actionable capability diagnostics, and
-**never silently fall back from a browser operation to a semantically different
-fetch operation.**
+memory, and CLI plumbing dependency-light — import-clean of Playwright behind
+those protocol seams — even though Playwright itself is not dependency-light.
+
+**Decision (2026-08-07, spec claim c8): Playwright is a core runtime
+dependency, not a declared extra.** Issue #1 section 12 recommends shipping
+Playwright as an optional extra or adapter package so `dependencies = []`
+stays true indefinitely; the user overrode that recommendation for this
+build. At M2, `pyproject.toml` gains `playwright` as an unconditional
+dependency — there is no browser-less install mode. What survives from the
+original recommendation is the *reason* it existed: the operation-model
+modules (`operations.py`, `results.py`, `policy.py`, `extraction.py`,
+`evidence.py`, …) still never import Playwright directly and never leak
+Playwright types into the public API — only `adapters/playwright.py` does,
+behind the protocol seams above. An import-boundary test enforces this (build
+plan task t6). `dependencies = []` was true through M0 only; do not describe
+it as a permanent property anywhere in this repo. Provide `doctor` /
+browser-install diagnostics, pin and report compatible versions, fail with
+actionable capability diagnostics, and **never silently fall back from a
+browser operation to a semantically different fetch operation.**
 
 ### 9. Suggested package shape
 
@@ -495,11 +511,13 @@ touching them publishes a `.devN` build to TestPyPI. Dist name is `webglass-cli`
 ## Known gotchas
 
 - **Console script is `webglass`, not `webglass-cli`.** `[project.scripts]` binds
-  `webglass = "webglass.cli:main"`. The README's `uv run webglass-cli ...`
-  examples are wrong — that binary does not exist. Naming map: dist/PyPI name
-  `webglass-cli`, import package `webglass`, console script `webglass`, argparse
-  `prog` `webglass-cli`. This divergence is why the explain catalog keys the root
-  entry under *both* names (see the rubric section). These should converge as the
-  product matures.
+  `webglass = "webglass.cli:main"`. README.md's quickstart already uses the
+  correct `uv run webglass ...` form — an earlier version of this gotcha
+  claimed the README used a non-existent `webglass-cli` binary; that was fixed
+  in the README and this note is now a correction record, not a live warning.
+  Naming map: dist/PyPI name `webglass-cli`, import package `webglass`,
+  console script `webglass`, argparse `prog` `webglass-cli`. This divergence is
+  why the explain catalog keys the root entry under *both* names (see the
+  rubric section). These should converge as the product matures.
 - **Issue #2 is closed and superseded.** Any doc or comment pointing at #2 for
   the design spec is stale — the brief lives in #1.
