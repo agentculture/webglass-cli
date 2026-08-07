@@ -80,7 +80,9 @@ requires_browser = pytest.mark.skipif(
 
 #: The planted secret. Distinctive enough that finding it anywhere is
 #: unambiguous, and shaped like the CDP endpoint it stands in for.
-PLANTED_ENDPOINT = "http://127.0.0.1:59999/planted-cdp-secret-1a2b3c4d"
+# Deliberately fake and low-entropy so secret scanners (GitGuardian) do not
+# flag it; distinctive enough that finding it anywhere is still a leak.
+PLANTED_ENDPOINT = "http://127.0.0.1:59999/planted-test-endpoint-not-a-secret"
 
 #: What the CLI factory uses for caller/task (``_factory``'s fixed identity).
 #: Records the CLI must be able to see have to carry the same caller, because

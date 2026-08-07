@@ -454,7 +454,10 @@ class TestFromEnv:
 
 
 class TestPlantedKeyRedaction:
-    SENTINEL = "brave-sk-PLANTED-SECRET-DO-NOT-LEAK-9f31c2a7"
+    # Deliberately fake and low-entropy so secret scanners (GitGuardian) do
+    # not flag it as a real Brave key; distinctive enough that finding it in
+    # any output is still an unambiguous redaction failure.
+    SENTINEL = "webglass-planted-test-key-not-a-real-secret"
 
     def test_planted_key_is_redacted_everywhere(self, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.DEBUG, logger="webglass.adapters.brave")
