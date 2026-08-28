@@ -261,16 +261,46 @@ def default_sessions_dir(environ: Mapping[str, str] | None = None) -> Path:
     return default_state_root(environ) / SESSIONS_DIRNAME
 
 
-def _is_running(pid: int) -> bool:
+#: The three outcomes of probing a pid with ``kill(pid, 0)``. ``"foreign"`` is
+#: split out from ``"running"`` because the two answer different questions:
+#: *is something alive at this pid* (yes, for both) versus *is that something
+#: our browser* (yes only for ``"running"``) — see :func:`_pid_liveness`.
+_PidLiveness = str  # "running" | "dead" | "foreign"
+
+
+def _pid_liveness(pid: int) -> _PidLiveness:
+    """Probe ``pid`` with a signal-0 ``kill`` and classify what answered.
+
+    ``"dead"`` — ``ProcessLookupError``: nothing with this pid exists.
+
+    ``"foreign"`` — ``PermissionError``: something with this pid exists, but
+    the OS refuses to let us signal it because it belongs to another user.
+    On a long-lived host this is overwhelmingly pid reuse *after* our
+    browser already exited, not our own browser somehow surviving under a
+    different uid — the pid space wrapped around and the OS handed our old
+    number to someone else's process. Callers must never fold this into
+    "our browser is alive" (spec honesty h4); see ``to_public_dict``'s
+    ``observed_liveness`` field, which reports it as ``"unknown"`` rather
+    than claiming the process as ours.
+
+    ``"running"`` — the signal was accepted: a process we are allowed to
+    signal exists at this pid.
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return "dead"
     except PermissionError:
-        # Alive, but owned by someone else — see terminate_pid on why this
-        # store refuses to escalate against it.
-        return True
-    return True
+        return "foreign"
+    return "running"
+
+
+def _is_running(pid: int) -> bool:
+    """Whether *something* answers at ``pid`` — collapses ``"foreign"`` into
+    "yes" because this predicate is used by :func:`terminate_pid` to decide
+    whether to keep waiting/escalate, not to decide ownership. Anything
+    needing the ownership distinction uses :func:`_pid_liveness` directly."""
+    return _pid_liveness(pid) != "dead"
 
 
 def _reap_child(pid: int) -> None:
@@ -401,7 +431,25 @@ class FileSessionRecord(SessionRecord):
     browser_was_running: bool | None = None
 
     def to_public_dict(self) -> dict[str, Any]:
-        """The base record's safe dict, plus the process facts — never the endpoint."""
+        """The base record's safe dict, plus the process facts — never the endpoint.
+
+        ``observed_liveness`` is computed fresh on every call from a live
+        ``kill(pid, 0)`` probe (spec claim c7 / honesty h4): it is an
+        *observed fact at render time*, not a stored field and not something
+        this method ever writes back to the record or the file on disk — a
+        record marked ``active`` with a long-dead pid renders as ``"dead"``
+        on this and every future call, forever, until something actually
+        reaps it (``session clean``/``close``, a separate write path). Values:
+
+        * ``"running"`` — the pid answered and we are allowed to signal it;
+        * ``"dead"`` — nothing answers at that pid any more;
+        * ``"unknown"`` — no pid was ever recorded, *or* a pid answered but
+          belongs to another user (see :func:`_pid_liveness`) — that case is
+          deliberately not reported as ``"running"``: it is almost always
+          pid reuse after our browser already exited, and claiming it as
+          "ours, alive" would be exactly the false confidence this field
+          exists to prevent.
+        """
         payload = super().to_public_dict()
         payload.update(
             {
@@ -411,9 +459,19 @@ class FileSessionRecord(SessionRecord):
                 "diagnostics": list(self.diagnostics),
                 "browser_reaped": self.browser_reaped,
                 "browser_was_running": self.browser_was_running,
+                "observed_liveness": self._observed_liveness(),
             }
         )
         return payload
+
+    def _observed_liveness(self) -> str:
+        """See ``observed_liveness`` in :meth:`to_public_dict`'s docstring."""
+        if self.pid is None:
+            return "unknown"
+        liveness = _pid_liveness(self.pid)
+        if liveness == "foreign":
+            return "unknown"
+        return liveness
 
 
 class FileSessionStore:
