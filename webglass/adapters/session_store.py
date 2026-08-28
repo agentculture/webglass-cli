@@ -353,19 +353,23 @@ def _slid_expiry(record: FileSessionRecord, now: float) -> float:
     ``RECORD_SCHEMA_VERSION`` bump, and a record written by an older
     WebGlass slides correctly the first time it is used.
 
-    Two guards, both ``max``-shaped so this can only ever *extend* a life:
+    ``max``-shaped so this can only ever *extend* a life: a record whose
+    ``expires_at`` already precedes its ``last_used_at`` (only reachable by
+    hand-writing a record file) yields a non-positive lifetime, and is left
+    exactly as it is rather than being retroactively shortened or resurrected.
 
-    * a record whose ``expires_at`` already precedes its ``last_used_at``
-      (only reachable by hand-writing a record file) yields a non-positive
-      lifetime, and is left exactly as it is rather than being retroactively
-      shortened or resurrected;
-    * a lease longer than the session's own TTL would otherwise leave the
-      record expiring while still held, so the lease's own expiry is a
-      floor — the record never promises less than the lease it just granted.
+    The lease is deliberately **not** a floor here. An earlier version made
+    it one, reasoning that a record should never expire while a lease is
+    still held — but that inverts the caller's intent whenever the default
+    lease TTL is longer than the session's own: ``session create
+    --ttl-seconds 1`` then acquired a 30s lease and silently became a 30s
+    session. A lease is a claim *on* a session, so it is the lease that gets
+    capped to the record's lifetime (see
+    :meth:`FileSessionStore.acquire_lease`), never the record that gets
+    stretched to the lease.
     """
     lifetime = record.expires_at - record.last_used_at
-    lease_floor = record.lease.expires_at if record.lease is not None else record.expires_at
-    return max(record.expires_at, now + lifetime, lease_floor)
+    return max(record.expires_at, now + lifetime)
 
 
 def _hosts_from_urls(urls: Iterable[str]) -> list[str]:
@@ -1125,11 +1129,10 @@ class FileSessionStore:
                     held_by=current.holder,
                     reason="lease_held",
                 )
-            record.lease = Lease(holder=holder, acquired_at=now, expires_at=now + ttl_seconds)
             # Order matters: the lifetime is read off the *pre-update*
-            # last_used_at, and the lease must already be set so an unusually
-            # long lease cannot outlive the record holding it.
+            # last_used_at, so slide the expiry before touching it.
             record.expires_at = _slid_expiry(record, now)
+            record.lease = Lease(holder=holder, acquired_at=now, expires_at=now + ttl_seconds)
             record.last_used_at = now
             self._write_unlocked(record)
             return LeaseGrant(

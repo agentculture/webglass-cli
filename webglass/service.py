@@ -2239,9 +2239,18 @@ class WebGlassService:
             expires_at=now + ttl,
             capability_profile_ref=run.context.policy_profile_ref,
         )
-        outcome = store.acquire_lease(
-            record.session_id, self._lease_holder(run.context), now, DEFAULT_LEASE_TTL_SECONDS
-        )
+        holder = self._lease_holder(run.context)
+        outcome = store.acquire_lease(record.session_id, holder, now, DEFAULT_LEASE_TTL_SECONDS)
+        # Release it again immediately. `session create` proves the session is
+        # exclusively ours by taking the lease, but the invocation ends here —
+        # nothing is using the session once this process exits, and a lease
+        # left behind would make the record un-reapable for the lease's full
+        # TTL. That is strictly wrong when the caller asked for a shorter
+        # session than the lease: `--ttl-seconds 1` would leave a record no
+        # sweep could touch for thirty seconds (issue #14 follow-up). A caller
+        # that actually intends to use the session acquires its own lease.
+        if not isinstance(outcome, LeaseRefusal):
+            store.release_lease(record.session_id, holder)
         run.effect("session-created")
         # to_public_dict() is the only session serialization used anywhere in
         # this module: endpoint_ref is secret-equivalent and never leaves the

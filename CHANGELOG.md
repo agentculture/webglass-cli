@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-08-28
+
+### Fixed
+
+- A lease could silently override a shorter caller-requested session TTL: `session create --ttl-seconds 1` acquired a 30s lease whose expiry floored the record's, producing a 30-second session. The lease no longer extends the record it claims.
+- `session create` left its lease held after the one-shot invocation exited, making the record un-reapable for the lease's full TTL. It now releases the lease it took.
+
 ## [0.8.0] - 2026-08-28
 
 ### Added
