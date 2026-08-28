@@ -1183,6 +1183,45 @@ class WebGlassService:
                 )
         return record
 
+    def _session_generation(self, session_id: str) -> int:
+        """The generation to stamp on a snapshot taken in ``session_id``.
+
+        Element references are scoped to a ``snapshot_id`` *and* a generation
+        (:mod:`webglass.references`), and the generation is where a session's
+        own history enters that scope. A session whose store record has been
+        bumped — which is what reusing a session across two invocations of one
+        flow does (build plan t13) — mints snapshots at the new generation, so
+        a reference the caller was holding from before the reuse is refused as
+        stale rather than resolved against whatever element now sits at that
+        index.
+
+        A session with no stored record (the unstored id a caller-less
+        navigation mints, or an in-memory store that never heard of it)
+        generation-stamps at ``0``: there is no history to have left behind.
+        """
+        store = self.sessions
+        if store is None:
+            return 0
+        record = store.get(session_id)
+        return 0 if record is None else int(getattr(record, "generation", 0) or 0)
+
+    def _session_identity(self, run: _Run) -> dict[str, Any]:
+        """The trusted control metadata naming the session an operation ran in.
+
+        One helper, so a navigation and a live re-read describe the session
+        identically: which session, whether this invocation owns its
+        throwaway lifetime, and whether it is one an earlier step of the same
+        flow opened (build plan t13). Both lifetime facts are read off the
+        *operation* — only the component that provisioned the session knows
+        them, and inferring either one from the id is the mislabelling issue
+        #14 reported.
+        """
+        return {
+            "session_id": str(run.operation.session_id),
+            "ephemeral": bool(run.operation.session_ephemeral),
+            "reused": bool(run.operation.session_reused),
+        }
+
     def _session_for_navigation(self, run: _Run) -> tuple[str, dict[str, Any]]:
         """Resolve the browser session a navigation runs in.
 
@@ -1200,14 +1239,18 @@ class WebGlassService:
         therefore labelled every CLI navigation ``ephemeral: false``, the
         mislabelling issue #14 reported. Library and CLI now render the same
         field from the same source.
+
+        ``reused`` rides the same path for the same reason (build plan t13):
+        a session an earlier invocation of this flow opened is
+        indistinguishable, by its id, from one created a moment ago, so the
+        operation carries the fact and the result reports it.
         """
         session_id = run.operation.session_id
         if session_id is None:
             ephemeral = self.ids.new_id("session")
-            return ephemeral, {"session_id": ephemeral, "ephemeral": True}
+            return ephemeral, {"session_id": ephemeral, "ephemeral": True, "reused": False}
         self._require_session(run, session_id, lease=True)
-        ephemeral = bool(run.operation.session_ephemeral)
-        return session_id, {"session_id": session_id, "ephemeral": ephemeral}
+        return session_id, self._session_identity(run)
 
     def _record_navigated_hosts(
         self, session_id: str, requested_url: str, hops: Sequence[NavigationHop]
@@ -1553,6 +1596,7 @@ class WebGlassService:
             requested_url=requested_url,
             final_url=opened.final_url,
             retrieved_at=_iso(self.clock.now()),
+            generation=self._session_generation(session_id),
             status=opened.status,
             redirect_chain=tuple(
                 hop.response_url if hop.response_url is not None else hop.requested_url
@@ -1689,10 +1733,9 @@ class WebGlassService:
         session_id = str(run.operation.session_id)
         self._require_session(run, session_id, lease=True)
         run.trusted["session"] = {
-            "session_id": session_id,
-            # Read off the operation, not assumed — same field, same source as
-            # _session_for_navigation (issue #14).
-            "ephemeral": bool(run.operation.session_ephemeral),
+            # Read off the operation, not assumed — same fields, same source
+            # as _session_for_navigation (issue #14; build plan t13).
+            **self._session_identity(run),
             "live_read": True,
         }
 

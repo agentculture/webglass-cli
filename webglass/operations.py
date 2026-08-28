@@ -193,6 +193,15 @@ class WebOperation:
     mislabelling issue #14 reported. Only the component that owns that
     lifetime sets this; ``False`` is the safe default, since a session nobody
     declared throwaway must never be reported as one.
+
+    ``session_reused`` is the same shape of fact for the other lifetime
+    question: whether ``session_id`` names a session an *earlier* invocation
+    of the same flow opened and this one continued (build plan t13). It is
+    carried rather than inferred for the same reason — nothing downstream
+    can tell a continued session from a freshly created one by looking at
+    the id — and reuse must never be silent: the result names the session
+    it reused, so a caller can see that this observation ran in a context
+    that already had history.
     """
 
     operation_id: str
@@ -201,6 +210,7 @@ class WebOperation:
     caller: CallerContext = field(default_factory=CallerContext)
     session_id: str | None = None
     session_ephemeral: bool = False
+    session_reused: bool = False
     exploration_id: str | None = None
     target: OperationTarget = field(default_factory=OperationTarget)
     cache_mode: CacheMode = CacheMode.LIVE
@@ -230,6 +240,7 @@ class WebOperation:
             "caller": self.caller.to_dict(),
             "session_id": self.session_id,
             "session_ephemeral": self.session_ephemeral,
+            "session_reused": self.session_reused,
             "exploration_id": self.exploration_id,
             "target": self.target.to_dict(),
             "cache_mode": self.cache_mode.value,
