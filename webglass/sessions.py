@@ -244,8 +244,26 @@ class SessionStore(Protocol):
         (see the module docstring and ``tests/test_sessions.py``).
         """
 
-    def clean(self, now: float) -> list[SessionRecord]:
-        """Expire sessions past their ``expires_at`` and return what was reaped."""
+    def clean(
+        self,
+        now: float,
+        *,
+        older_than_seconds: float | None = None,
+        status: SessionStatus | None = None,
+        site: str | None = None,
+    ) -> list[SessionRecord]:
+        """Expire sessions past their ``expires_at`` and return what was reaped.
+
+        ``older_than_seconds``/``status``/``site`` (build plan t9, issue #14)
+        narrow *which* records this sweep is allowed to touch, and compose as
+        AND: a record must satisfy every filter that was passed to be
+        eligible. ``None`` for a given filter means "no constraint from this
+        one" — the historical no-argument ``clean(now)`` call stays exactly
+        as permissive as before. Implementations must evaluate these under
+        the same per-record lock the rest of ``clean`` uses, never via a
+        caller reading the result and filtering afterwards: a read-then-act
+        split would race a concurrent ``clean``/lease call between the two.
+        """
 
     def acquire_lease(
         self,
@@ -334,14 +352,37 @@ class InMemorySessionStore:
             record.status = SessionStatus.CLOSED
             record.lease = None
 
-    def clean(self, now: float) -> list[SessionRecord]:
+    def clean(
+        self,
+        now: float,
+        *,
+        older_than_seconds: float | None = None,
+        status: SessionStatus | None = None,
+        site: str | None = None,
+    ) -> list[SessionRecord]:
         with self._lock:
             reaped: list[SessionRecord] = []
             for record in self._records.values():
-                if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
-                    record.status = SessionStatus.EXPIRED
-                    record.lease = None
-                    reaped.append(record)
+                if record.status is not SessionStatus.ACTIVE or record.expires_at > now:
+                    continue
+                if status is not None and record.status is not status:
+                    continue
+                if older_than_seconds is not None and (now - record.expires_at) < (
+                    older_than_seconds
+                ):
+                    continue
+                if site is not None:
+                    # The base SessionRecord carries no navigation history at
+                    # all (that is FileSessionRecord's t8 addition), so an
+                    # in-memory record can never be known to have visited
+                    # anywhere -- same "unknown is not a match" rule as the
+                    # file store's ``hosts is None`` case.
+                    hosts = getattr(record, "hosts", None)
+                    if hosts is None or site not in hosts:
+                        continue
+                record.status = SessionStatus.EXPIRED
+                record.lease = None
+                reaped.append(record)
             return reaped
 
     def acquire_lease(

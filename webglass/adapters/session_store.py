@@ -900,7 +900,14 @@ class FileSessionStore:
             self._write_unlocked(record)
             return record
 
-    def clean(self, now: float) -> list[FileSessionRecord]:
+    def clean(
+        self,
+        now: float,
+        *,
+        older_than_seconds: float | None = None,
+        status: SessionStatus | None = None,
+        site: str | None = None,
+    ) -> list[FileSessionRecord]:
         """Reap expired sessions, their browsers, and their leftovers.
 
         Four separate jobs, in one deterministic pass:
@@ -932,6 +939,21 @@ class FileSessionStore:
         would recreate the orphan-browser leak this method exists to prevent
         (claim c38). The service says so out loud, reporting how many of the
         sessions it reaped belonged to other callers.
+
+        ``older_than_seconds``/``status``/``site`` (issue #14 task t9) gate
+        the two jobs that actually remove or expire something — case 1 and
+        case 3 — and compose as AND: a record must satisfy every filter that
+        was passed. They deliberately do **not** touch case 2 (lease
+        bookkeeping) or case 4 (corrupt-file removal): neither of those is a
+        "reap" in the caller's sense, and a record whose file cannot even be
+        read has nothing left to filter on. An unmatched filter reaps
+        nothing rather than falling back to reaping everything — a
+        ``--older-than`` that matches no record is a normal, successful
+        clean of zero sessions, never a silent "clean everything instead".
+        These are evaluated right here, under the same per-record lock every
+        other job in this loop uses, precisely so a caller can never read a
+        record, decide it matches, and act on it in a way that races a
+        concurrent ``clean`` or lease call in between.
         """
         reaped: list[FileSessionRecord] = []
         for session_id in self._session_ids():
@@ -946,12 +968,16 @@ class FileSessionStore:
                 if _lease_is_live(record, now):
                     # In use. Not expired-but-idle, not orphaned: in use.
                     continue
+                filtered = self._reapable(
+                    record, now, older_than_seconds=older_than_seconds, status=status, site=site
+                )
                 if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
-                    record.status = SessionStatus.EXPIRED
-                    record.lease = None
-                    self._reap_browser(record)
-                    self._write_unlocked(record)
-                    reaped.append(record)
+                    if filtered:
+                        record.status = SessionStatus.EXPIRED
+                        record.lease = None
+                        self._reap_browser(record)
+                        self._write_unlocked(record)
+                        reaped.append(record)
                 elif (
                     record.status is SessionStatus.ACTIVE
                     and record.lease is not None
@@ -959,9 +985,49 @@ class FileSessionStore:
                 ):
                     record.lease = None
                     self._write_unlocked(record)
-                elif record.status is not SessionStatus.ACTIVE and self._purgeable(record, now):
+                elif (
+                    record.status is not SessionStatus.ACTIVE
+                    and self._purgeable(record, now)
+                    and filtered
+                ):
                     self._purge_unlocked(session_id)
         return reaped
+
+    def _reapable(
+        self,
+        record: FileSessionRecord,
+        now: float,
+        *,
+        older_than_seconds: float | None,
+        status: SessionStatus | None,
+        site: str | None,
+    ) -> bool:
+        """Whether ``record`` satisfies every ``session clean`` filter that was passed.
+
+        AND composition: a filter that is ``None`` imposes no constraint, and
+        every filter that is not ``None`` must pass. Called once per record,
+        before deciding whether to reap it, from inside the same lock
+        :meth:`clean` already holds.
+        """
+        if status is not None and record.status is not status:
+            return False
+        if older_than_seconds is not None:
+            # Same age definition ``_purgeable`` uses: whichever of
+            # last-activity or expiry is more recent, so a session that was
+            # used right up until it expired is not called "old" the instant
+            # its clock runs out.
+            age = now - max(record.last_used_at, record.expires_at)
+            if age < older_than_seconds:
+                return False
+        if site is not None:
+            # ``hosts is None`` means "never tracked" (a pre-upgrade record
+            # or one this store has no navigation data for at all) -- it
+            # must never be treated as "confirmed not visited". Only a
+            # tracked set (``()`` or a populated tuple) that actually lacks
+            # ``site`` is a genuine non-match.
+            if record.hosts is None or site not in record.hosts:
+                return False
+        return True
 
     def acquire_lease(
         self,

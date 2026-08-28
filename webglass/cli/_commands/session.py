@@ -17,14 +17,45 @@ logic in handlers" (spec honesty h2).
 from __future__ import annotations
 
 import argparse
+import re
 from typing import Any
 
 from webglass.cli import _factory
 from webglass.cli._commands.overview import emit_overview
+from webglass.cli._errors import EXIT_USER_ERROR, CliError
 from webglass.effects import OperationKind
+from webglass.sessions import SessionStatus
+
+#: Accepts a bare number of seconds ("90"), or a number suffixed with one of
+#: s(econds)/m(inutes)/h(ours)/d(ays) ("30s", "10m", "2h", "7d"). Anchored on
+#: both ends so trailing garbage ("10mX") is rejected rather than truncated.
+_DURATION_RE = re.compile(r"^(?P<amount>\d+(?:\.\d+)?)(?P<unit>[smhd]?)$")
+_DURATION_UNIT_SECONDS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 #: Shared ``--json`` help text; every verb in this noun takes the flag.
 _JSON_HELP = "Emit structured JSON."
+
+
+def _parse_older_than(raw: str) -> float:
+    """Parse ``--older-than`` into seconds, or raise a structured ``CliError``.
+
+    A malformed duration is a user-input error surfaced through the CLI's
+    own error contract (exit 1, ``{code, message, remediation}``) — never a
+    silently-substituted default. A typo'd duration must fail loudly rather
+    than quietly reap nothing (or, worse, fall back to unfiltered) (issue
+    #14 build plan t9, spec honesty h5).
+    """
+    match = _DURATION_RE.match(raw.strip()) if raw else None
+    if match is None:
+        raise CliError(
+            EXIT_USER_ERROR,
+            f"invalid --older-than duration: {raw!r}",
+            "use a number of seconds, optionally suffixed with s/m/h/d, "
+            "e.g. '90', '30s', '10m', '2h', '7d'",
+        )
+    amount = float(match.group("amount"))
+    return amount * _DURATION_UNIT_SECONDS[match.group("unit")]
+
 
 _OVERVIEW_SECTIONS = [
     {
@@ -34,7 +65,8 @@ _OVERVIEW_SECTIONS = [
             "session list — this caller's own sessions.",
             "session show <session-id> — one session's public record.",
             "session close <session-id> — close a session (touches no evidence/exploration).",
-            "session clean — reap this store's expired sessions.",
+            "session clean [--older-than DURATION] [--status STATUS] [--site HOST] — "
+            "reap this store's expired sessions, optionally filtered.",
             "session overview — this description.",
         ],
     },
@@ -51,7 +83,9 @@ _OVERVIEW_SECTIONS = [
             "refusal rather than sharing one live browser, and a crashed holder's lease "
             "frees itself at expiry.",
             "session clean reaps expired sessions, terminates their browser processes, "
-            "and removes their profile directories.",
+            "and removes their profile directories. --older-than/--status/--site narrow "
+            "which records are eligible and compose as AND; an unmatched filter reaps "
+            "nothing rather than falling back to reaping everything.",
         ],
     },
     {
@@ -110,7 +144,14 @@ def cmd_session_close(args: argparse.Namespace) -> int:
 
 
 def cmd_session_clean(args: argparse.Namespace) -> int:
-    return _run(OperationKind.SESSION_CLEAN, args)
+    normalized: dict[str, Any] = {}
+    if args.older_than is not None:
+        normalized["older_than_seconds"] = _parse_older_than(args.older_than)
+    if args.status is not None:
+        normalized["status"] = args.status
+    if args.site is not None:
+        normalized["site"] = args.site
+    return _run(OperationKind.SESSION_CLEAN, args, normalized_args=normalized)
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -147,5 +188,31 @@ def register(sub: argparse._SubParsersAction) -> None:
     cl.set_defaults(func=cmd_session_close)
 
     cn = noun_sub.add_parser("clean", help="Reap this store's expired sessions.")
+    cn.add_argument(
+        "--older-than",
+        default=None,
+        metavar="DURATION",
+        help=(
+            "Only reap records at least this old. A number of seconds, optionally "
+            "suffixed with s/m/h/d, e.g. '90', '30s', '10m', '2h', '7d'. Composes as "
+            "AND with --status/--site."
+        ),
+    )
+    cn.add_argument(
+        "--status",
+        choices=[member.value for member in SessionStatus],
+        default=None,
+        help="Only reap records currently at this status. Composes as AND with the others.",
+    )
+    cn.add_argument(
+        "--site",
+        default=None,
+        metavar="HOST",
+        help=(
+            "Only reap records that navigated to this host. A record with no tracked "
+            "navigation history (pre-upgrade, or never navigated) is never matched. "
+            "Composes as AND with the others."
+        ),
+    )
     cn.add_argument("--json", action="store_true", help=_JSON_HELP)
     cn.set_defaults(func=cmd_session_clean)
