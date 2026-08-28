@@ -89,6 +89,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -395,7 +396,16 @@ def _directory_size_bytes(directory: Path) -> int:
     """
     if not directory.is_dir():
         return 0
-    return sum(entry.stat().st_size for entry in directory.rglob("*") if entry.is_file())
+    total = 0
+    # Per-entry suppression, not one try around the walk: a directory being
+    # swept concurrently loses files under us, and a single vanished entry
+    # must cost this check one file's bytes rather than the whole figure.
+    # A health check that raises is worse than one that under-reports.
+    for entry in directory.rglob("*"):
+        with suppress(OSError):
+            if entry.is_file():
+                total += entry.stat().st_size
+    return total
 
 
 def check_session_store_health(sessions_dir: Path | None = None) -> Check:
@@ -423,8 +433,25 @@ def check_session_store_health(sessions_dir: Path | None = None) -> Check:
     changes the grouping key, not this check's shape.
     """
     store = FileSessionStore(sessions_dir if sessions_dir is not None else default_sessions_dir())
-    records = store.list()
-    corrupt = store.list_corrupt()
+    try:
+        records = store.list()
+        corrupt = store.list_corrupt()
+    except OSError as exc:
+        # t5 made the read paths tolerant of a corrupt *record*; the store
+        # directory itself can still be unreadable (permissions, a vanished
+        # mount). Report that as the finding — a health check whose job is to
+        # describe the store must not become the thing that crashes when the
+        # store is the problem.
+        return _check(
+            "session_store_health",
+            ok=True,
+            severity="warning",
+            message=f"session record store could not be read: {exc}",
+            remediation=(
+                "check that the WebGlass state directory exists and is readable "
+                "(see `webglass doctor` state_dir_writable)"
+            ),
+        )
 
     live_by_owner: dict[str, int] = {}
     stale_count = 0

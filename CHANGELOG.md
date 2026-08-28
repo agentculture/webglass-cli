@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2] - 2026-08-28
+
+### Fixed
+
+- A budgeted sweep always started at the same lexicographic record, so with a budget that only covers the first N, records near the tail could starve indefinitely. The sweep now rotates its start (PR #15 review).
+- `session clean --site` compared a raw command-line value against lower-cased stored hosts, so `--site EXAMPLE.com` never matched `example.com` (PR #15 review).
+- A record spared from reaping by an --older-than/--status/--site filter kept an expired lease, leaving it reading as in-use to the next caller (PR #15 review).
+- `doctor`'s session-store check could raise instead of reporting: an unreadable state directory escaped as an OSError, and a file vanishing mid-walk broke the size figure. Both now degrade to a warning (PR #15 review).
+
 ## [0.8.1] - 2026-08-28
 
 ### Fixed

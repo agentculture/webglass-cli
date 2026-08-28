@@ -15,8 +15,10 @@ import time
 
 import pytest
 
+from tests.conftest import SeedSessionRecords
+from webglass.adapters.session_store import FileSessionStore
 from webglass.cli import main
-from webglass.sessions import SessionStatus
+from webglass.sessions import Lease, SessionStatus
 
 CALLER = "cli"
 
@@ -357,3 +359,60 @@ def test_cli_clean_with_filters_reaps_only_matching_record(
 
     remaining_ids = {record.session_id for record in session_store.list()}
     assert "other-active-0" in remaining_ids
+
+
+def test_site_filter_is_case_insensitive(
+    session_store: FileSessionStore, seed_session_records: SeedSessionRecords
+) -> None:
+    """`--site EXAMPLE.com` matches a host recorded as `example.com`.
+
+    Hosts land lower-cased (``_hosts_from_urls`` uses ``urlsplit().hostname``)
+    but the filter value comes straight off the command line. Hostnames are
+    case-insensitive, so a caller who types the host the way the site brands
+    it must still match. Reported on PR #15.
+    """
+    now = time.time()
+    seed_session_records(
+        count=1,
+        status=SessionStatus.CLOSED,
+        session_id_prefix="cased",
+        # Older than the 3-day retention window so job 3 (purge) applies.
+        now=now - 400_000,
+        expires_at=now - 399_000,
+        hosts=("example.com",),
+    )
+    reaped_ids = {r.session_id for r in session_store.clean(now, site="EXAMPLE.com")}
+    assert session_store.get("cased-closed-0") is None, "the record should have been purged"
+    assert reaped_ids == set(), "a purge is job 3; it is not reported as reaped"
+
+
+def test_a_filtered_out_record_still_loses_its_dead_lease(
+    session_store: FileSessionStore, seed_session_records: SeedSessionRecords
+) -> None:
+    """A record spared by a filter still has its stale lease dropped.
+
+    Job 2 (drop a lease whose holder is gone) is independent of the
+    ``--older-than``/``--status``/``--site`` filters, which select what to
+    *reap*. Leaving an expired lease on a spared record would make it read as
+    in-use to the next caller and to ``_lease_is_live``. Reported on PR #15.
+    """
+    now = time.time()
+    seed_session_records(
+        count=1,
+        status=SessionStatus.ACTIVE,
+        session_id_prefix="spared",
+        now=now - 100,
+        expires_at=now - 50,
+    )
+    record = session_store.get("spared-active-0")
+    assert record is not None
+    record.lease = Lease(holder="gone", acquired_at=now - 100, expires_at=now - 60)
+    session_store._write_unlocked(record)  # noqa: SLF001 - test seeds a dead lease
+
+    # A --site filter no record can satisfy: nothing is reaped...
+    session_store.clean(now, site="nowhere.invalid")
+
+    after = session_store.get("spared-active-0")
+    assert after is not None
+    assert after.status is SessionStatus.ACTIVE, "the filter spared it from job 1"
+    assert after.lease is None, "but its dead lease is still stale and must be dropped"

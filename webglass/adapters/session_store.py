@@ -100,6 +100,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import tempfile
@@ -978,7 +979,7 @@ class FileSessionStore:
         """
         deadline = None if time_budget_seconds is None else time.monotonic() + time_budget_seconds
         reaped: list[FileSessionRecord] = []
-        for session_id in self._session_ids():
+        for session_id in self._sweep_order():
             if deadline is not None and time.monotonic() >= deadline:
                 break
             with self._locked(session_id):
@@ -1029,6 +1030,10 @@ class FileSessionStore:
         )
         if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
             if not filtered:
+                # Filtered out of job 1, but job 2 still applies: a lease whose
+                # holder is gone is stale regardless of why this record was
+                # spared, and leaving it would keep the record looking busy.
+                self._drop_dead_lease_unlocked(record, now)
                 return None
             # Job 1: expire it, stop its browser, report it.
             record.status = SessionStatus.EXPIRED
@@ -1036,19 +1041,33 @@ class FileSessionStore:
             self._reap_browser(record)
             self._write_unlocked(record)
             return record
-        if (
-            record.status is SessionStatus.ACTIVE
-            and record.lease is not None
-            and record.lease.expires_at <= now
-        ):
-            # Job 2: drop a lease whose holder is gone.
-            record.lease = None
-            self._write_unlocked(record)
+        if self._drop_dead_lease_unlocked(record, now):
             return None
         if record.status is not SessionStatus.ACTIVE and self._purgeable(record, now) and filtered:
             # Job 3: purge a long-dead record, bounding the directory.
             self._purge_unlocked(session_id)
         return None
+
+    def _drop_dead_lease_unlocked(self, record: FileSessionRecord, now: float) -> bool:
+        """Job 2: clear an expired lease on a still-active record.
+
+        Returns whether it cleared one. Split out of
+        :meth:`_clean_one_unlocked` because it applies on two paths — the
+        ordinary job-2 branch, and a record that a ``--older-than`` /
+        ``--status`` / ``--site`` filter spared from job 1. A stale lease is
+        stale either way: it names a holder that is gone, and leaving it in
+        place makes the record read as in-use to the next caller and to
+        :func:`_lease_is_live`.
+        """
+        if (
+            record.status is SessionStatus.ACTIVE
+            and record.lease is not None
+            and record.lease.expires_at <= now
+        ):
+            record.lease = None
+            self._write_unlocked(record)
+            return True
+        return False
 
     def _reapable(
         self,
@@ -1082,7 +1101,11 @@ class FileSessionStore:
             # must never be treated as "confirmed not visited". Only a
             # tracked set (``()`` or a populated tuple) that actually lacks
             # ``site`` is a genuine non-match.
-            if record.hosts is None or site not in record.hosts:
+            # Stored hosts are lower-cased by ``_hosts_from_urls``; the filter
+            # value comes straight off the command line, so `--site EXAMPLE.com`
+            # would otherwise never match a host recorded as `example.com`.
+            # Hostnames are case-insensitive, so compare them that way.
+            if record.hosts is None or site.lower() not in record.hosts:
                 return False
         return True
 
@@ -1206,6 +1229,24 @@ class FileSessionStore:
         except FileNotFoundError:
             return []
         return [entry.name[: -len(RECORD_SUFFIX)] for entry in entries if _is_record(entry)]
+
+    def _sweep_order(self) -> list[str]:
+        """:meth:`_session_ids`, rotated to a random start.
+
+        ``_session_ids`` is deliberately sorted — deterministic order is what
+        makes the rest of the store testable. But :meth:`clean`'s time budget
+        stops mid-pass, so a *sorted* order means every budgeted sweep chews
+        the same lexicographic head and records near the tail are never
+        reached: with a budget that only ever covers the first N, the last
+        record starves indefinitely. Rotating the start spreads the work over
+        successive sweeps, so every record is eventually visited without the
+        pass itself becoming unordered.
+        """
+        ids = self._session_ids()
+        if len(ids) < 2:
+            return ids
+        offset = secrets.randbelow(len(ids))
+        return ids[offset:] + ids[:offset]
 
     def _ensure_directory(self) -> None:
         self.directory.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
