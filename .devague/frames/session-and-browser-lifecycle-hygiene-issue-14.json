@@ -1,0 +1,966 @@
+{
+  "slug": "session-and-browser-lifecycle-hygiene-issue-14",
+  "title": "session and browser lifecycle hygiene (issue 14)",
+  "schema_version": 5,
+  "status": "exported",
+  "created": "2026-08-28T11:05:11Z",
+  "updated": "2026-08-28T12:41:03Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "webglass never leaves a session record or headless browser nobody can see or reap: ephemeral navigations are labelled honestly, doctor warns on session-store growth, and session clean --older-than sweeps stale records and orphaned browsers",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "A test drives an ordinary invocation against a store seeded with expired records and asserts the count shrinks without any 'session clean' call, and a separate test asserts a navigating verb with no --session-id renders ephemeral: true.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Verify end to end on a real store: seed expired records for two different callers, run an ordinary session-creating invocation as one of them, assert only that caller's records were reaped and a read verb reaps nothing; separately assert a navigating verb with no --session-id renders ephemeral: true.",
+      "revisions": []
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "A navigating verb that ran in a CLI-provisioned throwaway session must report `ephemeral: true`. Today `_session_for_navigation` (webglass/service.py:1185-1198) infers ephemerality from `operation.session_id is None`, but `ephemeral_session` (webglass/cli/_factory.py:579-655) always hands the operation a real stored id, so every CLI navigation reports `ephemeral: false` \u2014 including the failed one in issue #14. The operation, not the service, must carry the invocation-scoped-vs-caller-owned fact.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h2",
+          "text": "The ephemeral fact travels on the WebOperation (or context), not inferred in _session_for_navigation \u2014 so a library caller who creates a session explicitly and a CLI throwaway are distinguishable, and library/CLI parity (spec honesty h2) still holds because both report the same field from the same source.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Carry the invocation-scoped fact on the WebOperation (or WebContext) set by ephemeral_session, and have _session_for_navigation (service.py:1194) read it instead of inferring from session_id is None.",
+      "revisions": []
+    },
+    {
+      "id": "c3",
+      "kind": "boundary",
+      "text": "The ephemeral close-on-error contract already holds and must not be rewritten. `ephemeral_session`'s `finally` calls `store.close()` on every path including navigation failure, and `FileSessionStore.close` (session_store.py:517-531) terminates the browser and removes the profile dir. Verified on the reporting host: all 115 `ephemeral-*` records are `closed` with `browser_reaped=true, browser_was_running=true`, and zero `ephemeral-*` records are stuck `active`. Issue #14 ask 1's cleanup half is already implemented; only the label is wrong.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "The 115/115 browser_reaped evidence is reproducible: a test drives a navigation that fails (unresolvable host) inside an ephemeral session and asserts the record ends 'closed' with the browser terminated and the profile directory gone.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Do not rewrite ephemeral_session's finally-close or FileSessionStore.close. Add the regression test from h14 so the working behaviour is pinned before anything else in this slice moves.",
+      "revisions": []
+    },
+    {
+      "id": "c4",
+      "kind": "requirement",
+      "text": "`webglass doctor` gains a session-store health check alongside the five browser checks in webglass/cli/_browser_doctor.py (browser_checks(), lines 358-366): live/stale session counts and record-directory size, warning above a threshold. Doctor's `{healthy, checks:[{id,passed,severity,message,remediation}]}` shape and the `passed=True for every severity except error` convention are the contract to extend, not change.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "The session-store check is read-only and cheap: it counts records and probes recorded pids without launching a browser, holding a lock, or mutating a record \u2014 matching the existing browser checks, none of which ever launches anything.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add a session-store check to browser_checks() (_browser_doctor.py:358-366) returning severity=warning with passed=True above the threshold, following check_state_dir_writable's shape.",
+      "revisions": []
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "`session clean` gains an `--older-than` sweep. Today `FileSessionStore.clean` (session_store.py:533-578) only expires actives past `expires_at`, drops dead leases, and purges non-active records older than DEFAULT_RECORD_RETENTION_SECONDS (7 days, line 167). Nothing in webglass ever calls it automatically \u2014 `grep 'store.clean'` finds exactly one caller, `_op_session_clean` (service.py:2179-2198). That is why the host accumulated 134 records: 115 closed-but-within-retention plus 19 `session-*` records still marked `active` although they expired ~20 days ago and every recorded pid is dead.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "store.clean grows an explicit filter argument rather than the CLI post-filtering its results: the store is the only thing that holds the per-record lock, so a caller that reads-then-decides would race a concurrent invocation.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Keep store.clean as the single reaping implementation; add the opportunistic caller (c14) and the filter flags (c13) around it rather than a second cleanup path.",
+      "revisions": []
+    },
+    {
+      "id": "c6",
+      "kind": "non_goal",
+      "text": "WebGlass must not kill browser processes it did not launch. The 187 chromium processes / 42 GB RSS in issue #14 are the reporter's *desktop snap Chromium* (one `/snap/chromium/3506/.../chrome` parent, 186 `--type=` renderer children, uptime ~7.9 days), not WebGlass leaks: no process on the host carries a `--user-data-dir` under the webglass state dir, and all 134 recorded session pids are dead. Reaping stays scoped to pids WebGlass recorded on its own session records.",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Scope every reap to pids WebGlass recorded on its own session records; never enumerate the process table.",
+      "revisions": []
+    },
+    {
+      "id": "c7",
+      "kind": "requirement",
+      "text": "A record marked `active` whose recorded pid is dead must be visible as such. All 19 stale records on the host are `status=active, browser_reaped=false, browser_was_running=null` with dead pids \u2014 `session list`/`show` render `to_public_dict()` (session_store.py:403-416) verbatim and never probe liveness, so a crashed caller's session reads as live indefinitely. The store already has `_is_running` (line 264) for exactly this question.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "Liveness is reported as an observed fact at render time, never written back as a silent status mutation on a read path \u2014 'session list' must not mutate records, and a pid that is alive but reused by another user's process must not be claimed as ours.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Probe record.pid with the existing _is_running (session_store.py:264) at render time in to_public_dict()'s consumers; report it as an observed liveness field, never by mutating status on a read path.",
+      "revisions": []
+    },
+    {
+      "id": "c8",
+      "kind": "boundary",
+      "text": "Detached launch stays detached. `launch_detached` (webglass/adapters/playwright.py:416-480) uses `start_new_session=True` deliberately \u2014 it is what makes cross-invocation sessions (spec claim c29) work \u2014 so a group-killed CLI cannot take its browser with it. The fix is reaping by record, not un-detaching the launch.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "start_new_session=True stays in launch_detached and a test pins it \u2014 removing it would silently break cross-invocation sessions (spec claim c29), so the detach is asserted, not merely left alone.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Leave launch_detached alone and add the test from h15 pinning start_new_session=True.",
+      "revisions": []
+    },
+    {
+      "id": "c9",
+      "kind": "non_goal",
+      "text": "Colleague-side mitigations stay in colleague. agentculture/colleague#436 and #435, and web-scout spec claim c37 (per-invocation process groups, group-kill on timeout, doctor warning above 10 sessions) are that repo's work; the dependency direction is one-way (Colleague -> webglass-cli) and webglass must not learn colleague semantics.",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Do not mirror colleague's mitigations here; note in the issue reply that colleague#436/#435 cover the caller side.",
+      "revisions": []
+    },
+    {
+      "id": "c10",
+      "kind": "boundary",
+      "text": "M3 surfaces stay untouched. Evidence, exploration, and Web-memory (webglass/evidence.py, exploration.py, memory.py) are unbuilt per issue #8; this work touches only the session-lifecycle plane \u2014 service.py session ops, adapters/session_store.py, cli/_factory.py, cli/_commands/session.py, cli/_browser_doctor.py, cli/_commands/doctor.py \u2014 plus their explain-catalog entries.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "An import-boundary assertion holds: nothing in the session-lifecycle plane imports evidence.py, exploration.py, or memory.py, checked the way tests/test_import_boundaries.py already checks the Playwright seam.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Extend tests/test_import_boundaries.py with the session-plane assertion from h16.",
+      "revisions": []
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "Every user-visible surface that describes the throwaway-session contract updates in the same PR: `page open --help` (cli/_commands/page.py:75, 208), the page module docstring (line 31), the explain catalog entry (webglass/explain/catalog.py:226), and `session overview`'s Persistence section (cli/_commands/session.py:41-56). CLAUDE.md requires status text to stay current in the shipping PR.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "A test asserts the throwaway-session wording is consistent across page.py's help/docstring, the explain catalog entry, and session overview \u2014 the same way test_every_catalog_path_resolves guards the catalog \u2014 so the four surfaces cannot drift apart again.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Update page.py:31/75/208, explain/catalog.py:226, and session.py's Persistence overview section together, and add the consistency test from h8.",
+      "revisions": []
+    },
+    {
+      "id": "c12",
+      "kind": "decision",
+      "text": "Ephemeral records keep the 7-day retention window (q1); unbounded growth is solved by opportunistic cleanup (q2), and doctor warns rather than fails (q3).",
+      "origin": "user",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Superseded by c22 (retention is 3 days, not 7). Retained for the decision trail.",
+      "revisions": []
+    },
+    {
+      "id": "c13",
+      "kind": "requirement",
+      "text": "'session clean' gains filter flags \u2014 --older-than at minimum, plus further selectors such as by site. Today the clean parser (cli/_commands/session.py:145-148) takes no flags at all and store.clean(now) takes only a clock reading, so both the CLI surface and the store signature grow.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "Every filter flag composes as AND and an unmatched filter reaps nothing rather than falling back to reaping everything \u2014 a 'session clean --older-than 30d' that matched no record exits 0 having reaped zero, and a malformed duration is a structured invalid_argument, not a silent default.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Extend the clean parser (cli/_commands/session.py:145-148, which takes no flags today) and store.clean's signature together \u2014 filters are evaluated inside the store under its per-record lock, never by post-filtering results in the CLI. Cover --older-than, --status, and --site; a malformed duration is a structured invalid_argument.",
+      "revisions": []
+    },
+    {
+      "id": "c14",
+      "kind": "requirement",
+      "text": "A bounded opportunistic sweep runs inside ordinary invocations so no store depends on someone remembering 'session clean'. It must be cheap and bounded (the store already locks per record and 272 files were on the reporting host), must not turn a successful observation into a failure, and must not reap another caller's live sessions.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "The opportunistic sweep is bounded per invocation and never turns a successful observation into a failure: it runs outside the operation result path, swallows its own errors, and a store with thousands of records must not add measurable latency to 'page open'.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [
+        {
+          "id": "q1",
+          "text": "Which invocations sweep? Sweeping on every invocation including 'session list' means a read verb mutates the store the caller is trying to observe; sweeping only on session-creating invocations means a host that only ever reads never gets cleaned.",
+          "resolved": true,
+          "blocking": false,
+          "resolution": "Retention drops from 7 days to 3 days, and the 3-day window exists for a reason beyond forensics: records are kept so repeated visits can be found and mapped, enabling session reuse. This supersedes the earlier q1 answer (c12) that kept the 7-day DEFAULT_RECORD_RETENTION_SECONDS."
+        },
+        {
+          "id": "q2",
+          "text": "Whose records does an opportunistic sweep touch? store.clean() is store-wide and _op_session_clean already warns that it reaped other callers' expired sessions \u2014 an automatic sweep doing that silently, with no output surface to warn on, reaps another caller's records with nobody told.",
+          "resolved": true,
+          "blocking": false,
+          "resolution": "The opportunistic sweep runs on new cases only (a session-creating invocation, never a read verb) and touches only the invoking caller's own records; store-wide reaping stays explicit via 'session clean'. A new case is matched against the recent (last 3) sessions for the repetition/reuse mapping."
+        }
+      ],
+      "links": [],
+      "instruction": "Hook the sweep into the session-creating path only (cli/_factory.py's ephemeral_session and the session create op), scoped to the invoking caller's records, wrapped so its own failure can never fail the operation. Bound it per v1's answer once chosen.",
+      "revisions": []
+    },
+    {
+      "id": "c15",
+      "kind": "assumption",
+      "text": "Filtering 'session clean' by site requires a record field that does not exist. A live record carries backend_id/caller/owner/task/pid/user_data_dir/status/expires_at and no URL or host whatsoever, so --site implies adding a visited-host field, bumping RECORD_SCHEMA_VERSION from 1 (session_store.py:144), and writing the migration note docs/schema-versioning.md requires for every bump.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [
+        {
+          "id": "q3",
+          "text": "Which host does --site match when a session navigated to several? A session record is per-browser-context, not per-page, so 'the site' is a set \u2014 and matching on a set turns 'clean --site x' into 'reap any session that ever touched x', which is a different and broader promise than it sounds.",
+          "resolved": true,
+          "blocking": false,
+          "resolution": "--site is confirmed in scope as asked, with the new persisted visited-host record field and the privacy decision it implies. The same field serves the repetition mapping from q1, so it is no longer a cost carried by --site alone."
+        }
+      ],
+      "links": [],
+      "instruction": "Confirmed as an assumption: --site is built on the new host field, accepting the schema and privacy cost recorded in c16/c25.",
+      "revisions": []
+    },
+    {
+      "id": "c16",
+      "kind": "boundary",
+      "text": "Recording visited hosts on a persistent 0600 session record is new retained browsing data and must be treated as a privacy decision, not a free field \u2014 issue #1 section 8's 'never persist by default' list and the redacting repr() that already keeps endpoint_ref out of every render are the precedent. Scope, retention, and redaction of any host field are decided explicitly, not inherited from --site's convenience.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "The host field is never rendered where endpoint_ref is not: it stays out of the redacting repr(), and a test asserts a session record's repr and any log line carry no visited-host data.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Keep the host field out of FileSessionRecord's redacting repr (session_store.py:378-402) the way endpoint_ref already is; add the test from h17.",
+      "revisions": []
+    },
+    {
+      "id": "c17",
+      "kind": "audience",
+      "text": "Agent callers driving webglass one-shot from another process \u2014 colleague's web-scout being the reporting one (agentculture/colleague#436) \u2014 plus the human operating the host they share, who is the one who has to notice and clear a session store nobody is sweeping.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "The audience is real, not assumed: issue #14 was filed by colleague's web-scout work (agentculture/colleague#436) against a host shared with a human operator, and the asks are written from both viewpoints.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Write every user-facing string in this slice for both readers: an agent parsing --json and a human reading 'doctor' text output.",
+      "revisions": []
+    },
+    {
+      "id": "c18",
+      "kind": "after_state",
+      "text": "A webglass invocation is honest about the session it ran in and leaves nothing that grows without bound: a throwaway navigation reports ephemeral: true, a record whose browser is gone says so instead of reading 'active', ordinary invocations sweep the store opportunistically, 'session clean' takes filter flags, and 'doctor' warns when the store has grown past a healthy size.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h19",
+          "text": "Every clause of the after-state is separately observable: ephemeral: true in a JSON envelope, a dead-pid record rendering as not-live, a bounded record count after ordinary traffic, 'session clean --older-than' reaping by age, and a doctor check present in 'doctor --json'.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Treat the after-state as the acceptance checklist: five separately observable behaviours, one test each (h19, h22).",
+      "revisions": []
+    },
+    {
+      "id": "c19",
+      "kind": "before_state",
+      "text": "Nothing sweeps the store: _op_session_clean is the only caller of store.clean in the package, so a host accumulated 134 records \u2014 115 closed-but-within-retention and 19 marked 'active' though they expired ~20 days ago with dead pids. Every CLI navigation reports ephemeral: false regardless, 'session clean' takes no flags, and 'doctor' has five browser checks that never look at the session store.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h20",
+          "text": "The before-state numbers are reproducible from the reporting host, not recalled: 134 records (115 closed, 19 active with dead pids, expired ~20 days), and 'grep store.clean webglass/' returning exactly one caller.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Re-run the before-state measurement on the reporting host before and after the change, and put both numbers in the PR body as evidence.",
+      "revisions": []
+    },
+    {
+      "id": "c20",
+      "kind": "why_it_matters",
+      "text": "The observability gap cost a real investigation: issue #14 read 126 session records plus 187 chromium processes as one leak and filed all three asks against webglass, when the ephemeral close path was working correctly (115/115 records browser_reaped=true) and the 187 processes were the reporter's desktop snap Chromium. A store that never sweeps and a label that always says 'false' made a healthy subsystem indistinguishable from a leaking one.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h21",
+          "text": "The misdiagnosis is documented, not just asserted: issue #14's three asks are answered individually, saying which were real (the label, the missing sweep, the missing doctor check) and which rested on a wrong premise (the 187 chromium processes).",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Answer issue #14's three asks individually in the closing comment, naming which rested on the wrong premise (the 187 chromium processes) so the record is corrected where it was filed.",
+      "revisions": []
+    },
+    {
+      "id": "c21",
+      "kind": "success_signal",
+      "text": "On a host running ordinary webglass traffic the session record count stays bounded without anyone running 'session clean'; a navigation with no --session-id reports ephemeral: true; 'session list' never shows an 'active' record whose pid is dead; 'webglass doctor --json' carries a session-store check that warns (passed=true, severity=warning) above the threshold and never fails the exit code; 'session clean --older-than' reaps by age.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h22",
+          "text": "Each success signal has a test that fails today: the count-stays-bounded test, the ephemeral: true test, the no-dead-pid-reads-active test, the doctor-warns-without-failing test, and the --older-than test all go red against current main.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Write all five tests first and confirm each goes red against current main (h22) before implementing.",
+      "revisions": []
+    },
+    {
+      "id": "c22",
+      "kind": "decision",
+      "text": "Record retention drops from 7 days to 3 (DEFAULT_RECORD_RETENTION_SECONDS, session_store.py:167), superseding c12's 7-day answer. The window is kept not for forensics but so repeated visits can be found and mapped for reuse.",
+      "origin": "user",
+      "status": "proposed",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "Dropping retention 7d -> 3d does not shorten anything a caller depends on: no test, doc, or explain-catalog entry promises 7 days, and 'session show' after the fact stays answerable for the full 3-day window.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Change DEFAULT_RECORD_RETENTION_SECONDS (session_store.py:167) from 7*24*3600 to 3*24*3600 and add the test from h10.",
+      "revisions": []
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "WebGlass gains a safe way to find and map repeated sessions so they can be reused: a new case is matched against the invoking caller's recent (last 3) sessions, and a match makes reuse possible instead of launching a fresh browser.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "Reuse is opt-in and observable, never silent: a result that reused a prior session says so (alongside the ephemeral flag from c2), names the session it reused, and a caller can always demand a fresh anonymous context \u2014 the 'fresh anonymous session' capability WebContext already promises children.",
+          "status": "confirmed",
+          "instruction": ""
+        },
+        {
+          "id": "h13",
+          "text": "Reuse is bounded to a live session: a test asserts that a closed or expired record is never offered for reuse even inside the 3-day window, and that a reused session is always one the invoking caller still owns and whose lease it can acquire.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [
+        {
+          "id": "q4",
+          "text": "Does reuse mean reusing a still-ACTIVE session, or resurrecting a CLOSED one? _reap_browser (session_store.py:791-808) rmtree's both record.user_data_dir and the profile path on every close, so a closed record is a tombstone with no browser and no cookies left to reuse. Reusing an active session needs no retention change at all; resurrecting a closed one requires keeping the profile directory on disk for the 3-day window \u2014 which is retaining cookies, storage, and login state, not just a record.",
+          "resolved": true,
+          "blocking": false,
+          "resolution": "Reuse means reusing a still-ACTIVE, unexpired session \u2014 never resurrecting a closed one. _reap_browser keeps deleting the profile directory on close, so no cookies or storage are retained. The 3-day retention window exists for the mapping, not for the browser state."
+        },
+        {
+          "id": "q5",
+          "text": "How does reuse stay inside 'isolated per caller/task'? Issue #1 section 2 makes a browser session isolated per caller/task, and CLAUDE.md's invariant list says child agents never accidentally share cookies or mutable tabs. Matching a new case to a prior session by host and reusing it shares exactly that state across two tasks \u2014 so what makes two cases eligible to share, beyond same caller and same site?",
+          "resolved": true,
+          "blocking": true,
+          "resolution": "Sessions are never shared across tasks. Reuse is scoped to the immediate flow \u2014 a subsequent webglass call that is a continuation of the current one \u2014 so 'isolated per caller/task' and 'children never share cookies or mutable tabs' both hold unchanged. What is retained across the 3-day window is the mapping, not the session."
+        }
+      ],
+      "links": [],
+      "instruction": "Match a new case against the invoking caller's last 3 sessions by visited host; offer reuse only when the matched record is still ACTIVE, unexpired, and lease-acquirable by that caller. Never offer a closed or expired record \u2014 its profile directory is already deleted by _reap_browser.",
+      "revisions": []
+    },
+    {
+      "id": "c24",
+      "kind": "decision",
+      "text": "The opportunistic sweep runs on session-creating invocations only, never on a read verb, and reaps only the invoking caller's own records. Store-wide reaping stays explicit via 'session clean'.",
+      "origin": "user",
+      "status": "proposed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "A read verb provably does not sweep: a test asserts 'session list' against a store full of expired records leaves the record count unchanged, while a session-creating invocation against the same store shrinks it \u2014 and the sweep never touches a record whose caller differs from the invoking one.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Wire the sweep into the session-creating path only, filtered to the invoking caller; add the test from h11 asserting a read verb sweeps nothing.",
+      "revisions": []
+    },
+    {
+      "id": "c25",
+      "kind": "requirement",
+      "text": "The visited-host field is now load-bearing twice: it is what 'session clean --site' filters on (c13/c15) and what repetition-mapping matches on (c23). It lands additively with a safe default so RECORD_SCHEMA_VERSION stays at 1 per docs/schema-versioning.md, and inherits the record's existing redaction posture (c16).",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "A record written by the previous version (no host field) loads without error and reads as 'unknown hosts', not 'no hosts' \u2014 'clean --site x' must not reap a pre-upgrade record on the grounds that it demonstrably never visited x.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add the host field additively with a safe default so RECORD_SCHEMA_VERSION stays 1; _from_payload must default it for pre-upgrade records (h12).",
+      "revisions": []
+    },
+    {
+      "id": "c26",
+      "kind": "decision",
+      "text": "Two separate lifetimes: a SESSION is reusable only while active and unexpired, and only by an immediately subsequent webglass call in the same flow; a MAPPING is retained for 3 days to keep intelligence about hosts already visited and save tokens on future work. Sessions are never shared across tasks.",
+      "origin": "user",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Keep the two lifetimes visibly separate in code and naming: session reuse eligibility is a liveness question, mapping retention is a 3-day question. Never let one path read the other's expiry.",
+      "revisions": []
+    },
+    {
+      "id": "c27",
+      "kind": "boundary",
+      "text": "The retained mapping is proto-Web-memory and inherits its rules, not a new exception to them. Issue #1 section 2 makes Web-memory a searchable index that answers 'have we seen this?', never silently injects old content into a new answer, and is never a credential store. A 3-day host mapping that saves tokens must obey all three \u2014 and stays a mapping, not a content cache, since the durable evidence/memory stores themselves are M3 (issue #8).",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h23",
+          "text": "The mapping stores host-level facts only \u2014 never page content, never cookies, never credentials \u2014 and a test asserts a mapping entry's fields are bounded to that, so it cannot quietly become the content cache M3 is supposed to build.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Bound the mapping entry's fields to host-level facts and assert that bound in a test (h23), so it cannot grow into the content cache M3 owns.",
+      "revisions": []
+    },
+    {
+      "id": "c28",
+      "kind": "requirement",
+      "text": "The opportunistic sweep must not kill a live browser mid-operation. expires_at is written once at create (session_store.py:485-486) and never extended \u2014 acquire_lease refreshes last_used_at and the lease but not expires_at \u2014 while the ephemeral TTL is 300s (_factory.py:216). Any operation outstripping its TTL leaves an ACTIVE-past-expires_at record, and clean() reaps exactly that case: terminates the browser and rmtree's the profile. Manual-only cleanup makes this rare today; c14/c24 makes it routine. The sweep must treat a held lease, or a refreshed expiry, as proof of life.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h24",
+          "text": "A test runs a long operation whose record has passed expires_at while a second process performs a session-creating invocation, and asserts the first operation completes with its browser intact.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Make proof-of-life explicit in clean(): skip a record whose lease is held and unexpired, and/or extend expires_at on lease acquisition (session_store.py:612) so a long operation cannot age out mid-flight. Add the two-process test from h24.",
+      "revisions": []
+    },
+    {
+      "id": "c29",
+      "kind": "assumption",
+      "text": "c24's 'only the invoking caller's records' and c23's 'the invoking caller's last 3 sessions' both assume caller identity distinguishes concurrent invocations. It does not: _DEFAULT_CALLER = 'cli' (_factory.py:208) is hardcoded for every CLI invocation, and all 134 records measured on the reporting host carry caller='cli'. Filtering by caller therefore selects every CLI record on the host \u2014 the isolation promised in q2 and q5 does not exist at the identity layer.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [
+        {
+          "id": "q6",
+          "text": "What distinguishes two concurrent webglass invocations, given caller is 'cli' for all of them? Without an answer the sweep reaps a sibling process's sessions (q2's promise fails) and reuse can hand a session belonging to a different task (q5's promise fails). Candidates: derive caller from the OS process/session, require callers to pass an explicit --caller/--task, or scope both sweep and reuse to ids minted by this process.",
+          "resolved": true,
+          "blocking": true,
+          "resolution": "Parked for now rather than answered \u2014 see the parked blocking unknown recorded alongside c29. The identity model is not settled in this pass."
+        }
+      ],
+      "links": [],
+      "instruction": "Do not build c23 reuse or c24 caller-scoped sweeping until v4 resolves \u2014 caller-scoping is a no-op while _DEFAULT_CALLER is the literal 'cli'.",
+      "revisions": []
+    },
+    {
+      "id": "c30",
+      "kind": "requirement",
+      "text": "An automatic sweep needs an observability surface. 'session clean' renders its reaped records and warns when it touched another caller's (service.py:2191-2198), but a sweep hidden inside 'page open' has no result field to report through \u2014 it would terminate processes and delete profile directories with nothing said. Whatever it reaps must be visible after the fact (a diagnostic on the operation result, or a record the next 'session list' can show).",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h25",
+          "text": "A test asserts that an invocation whose sweep reaped something says so in its --json envelope, and that a caller can reconstruct what disappeared without having watched it happen.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add a diagnostics/effects field carrying what the sweep reaped, and assert it in the JSON envelope test from h25.",
+      "revisions": []
+    },
+    {
+      "id": "c31",
+      "kind": "boundary",
+      "text": "The sweep is an unrequested destructive local-state effect and must be classified as one. Issue #1 section 3 requires a local-state effect to run under an authorized state scope and retention policy; killing a process and rmtree-ing a profile directory is irreversible, and here it happens as a side effect of a caller asking for something else. It stays inside WebGlass-owned state \u2014 never another caller's live session, never a process WebGlass did not launch (c6).",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h28",
+          "text": "A test asserts the sweep never signals a pid absent from a WebGlass session record, and never reaps a record whose lease is held by a live holder.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Classify the sweep as a local-state effect in effects.py terms and keep it inside WebGlass-owned state; never a process WebGlass did not launch (c6), never another caller's live session.",
+      "revisions": []
+    },
+    {
+      "id": "c32",
+      "kind": "requirement",
+      "text": "The doctor session-store check and the sweep must both survive a corrupt record. FileSessionStore.list() is documented 'Raises on a corrupt one' (session_store.py:509) and _read_unlocked raises SessionRecordError on unparseable JSON \u2014 so one bad file breaks 'session list' and would break a doctor check built on list(). clean() already handles this correctly by purging unreadable records; the read paths must degrade to reporting the corruption, which is precisely the condition a health check exists to surface.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h26",
+          "text": "A test plants a corrupt record and asserts 'doctor --json' still returns its full check list, naming the corrupt record rather than failing to run.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Build the doctor check on a corruption-tolerant read rather than list(), and have it report the corrupt record as a finding. Add the planted-corrupt-record test from h26.",
+      "revisions": []
+    },
+    {
+      "id": "c33",
+      "kind": "requirement",
+      "text": "Reusing an active session must bump its generation. references.py scopes every element reference to a snapshot_id and generation and raises when one is applied outside the generation that issued it (references.py:89, 162-193), and the store already exposes bump_generation (session_store.py:631). Without a bump, a stale 'link:12' minted by the previous call could resolve against the reused session's new page \u2014 the exact failure the reference model exists to prevent.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h27",
+          "text": "A test reuses an active session and asserts a reference minted before the reuse is refused with the stale-reference error, not silently resolved.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Call bump_generation (session_store.py:631) on reuse and add the stale-reference test from h27.",
+      "revisions": []
+    },
+    {
+      "id": "c34",
+      "kind": "decision",
+      "text": "Session ownership follows the Playwright-MCP model: the client/process that opened a session owns it, and ownership scopes sweeping and reuse. This replaces caller-string scoping, which c29 showed is a no-op because _DEFAULT_CALLER is the literal 'cli' for every invocation.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c35",
+      "kind": "requirement",
+      "text": "Records gain a durable owner token identifying the client/process that opened the session, distinct from the 'cli' caller string, and the sweep and reuse both filter on it. It lands additively with a safe default so RECORD_SCHEMA_VERSION stays 1 (c25), and a pre-upgrade record with no owner token is never claimed by any owner.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h29",
+          "text": "A test runs two invocations under different owner tokens against one store and asserts neither reaps nor reuses the other's sessions, and that a pre-upgrade record with no owner token is left alone by both.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Add the owner token additively to the record and derive it per invoking client; filter clean() and the reuse match on it. Never fall back to caller when the token is absent \u2014 an unowned record is nobody's to reap.",
+      "revisions": []
+    },
+    {
+      "id": "c36",
+      "kind": "assumption",
+      "text": "The owner token identifies the long-lived CLIENT, not the one-shot OS process \u2014 this is what makes the model work. Under the Playwright-MCP analogy the server instance outlives individual calls, so a client such as colleague keeps one owner token across its many one-shot 'webglass' invocations. A token minted per OS process would make the sweep useless (each invocation owns exactly one session and would reap nothing), which was the objection that made v4 blocking; a per-client token is both safe and effective.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h30",
+          "text": "A test runs several sequential invocations under one owner token and asserts a later one reaps the earlier ones' expired sessions \u2014 proving the sweep is effective, not merely safe.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c37",
+      "kind": "success_signal",
+      "text": "Measurable targets: doctor warns above 10 live sessions for one owner (matching colleague#436's own threshold); the opportunistic sweep adds under 50ms to 'page open' against a store of 300 records; a steady-state store holds no more than 3 days of the owner's records; and the reporting host's 134 records fall below 10 after one ordinary invocation.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h31",
+          "text": "Each number is asserted by a test that fails today, not merely stated in the spec.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Assert each number directly: a doctor test at 10/11 sessions, a timing test against a 300-record store, and a retention test at the 3-day boundary.",
+      "revisions": []
+    },
+    {
+      "id": "c38",
+      "kind": "decision",
+      "text": "REVISES q2/c24. Identity and the sweep are decoupled: the sweep is owner-agnostic and gated on LIVENESS (lease held or expiry refreshed, per c28), not on ownership \u2014 an expired record means its owner is finished or crashed, and reaping it is safe and is what 'session clean' already does store-wide with a warning (service.py:2191-2198). A unique owner id is load-bearing only for continuation/reuse eligibility (c23). This dissolves c36's objection: sweep effectiveness no longer depends on a long-lived token, so a per-invocation unique id suffices.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h32",
+          "text": "A test asserts the sweep reaps an expired record belonging to another owner (effectiveness) while refusing to reap any record whose lease is held by a live holder (safety) \u2014 proving liveness, not ownership, is the gate.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Gate clean() on liveness only; keep the cross-owner warning from _op_session_clean. Scope the owner token to reuse matching alone.",
+      "revisions": []
+    },
+    {
+      "id": "c39",
+      "kind": "decision",
+      "text": "c36 is superseded by c38: the owner token no longer needs to identify a long-lived client. A unique id assigned per invocation is sufficient, because it now serves only continuation/reuse eligibility and never sweep scoping.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h33",
+          "text": "A test asserts a per-invocation unique id still lets an immediately subsequent call continue the prior session, without that id having to outlive the client.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Mint a unique owner id per invocation; a continuation call passes the prior id explicitly to claim eligibility.",
+      "revisions": []
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v1",
+      "text": "Whether the opportunistic sweep should be bounded by count (reap at most N records per invocation) or by time (spend at most Nms), and what that bound is. Both keep 'page open' fast; a count bound is deterministic and testable, a time bound degrades gracefully on a slow filesystem.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v2",
+      "text": "Whether --site is worth its cost at all in this slice. It is the only ask requiring a new persisted record field (c15) and a privacy decision (c16); --older-than and --status filters need neither and cover the reported symptom. Deferring --site to a follow-up would let this ship without touching what a session record retains.",
+      "kind": "follow_up",
+      "claim_id": null,
+      "resolved": true,
+      "resolution": "--site stays in this slice. The user confirmed it, and the visited-host field it needs is no longer a cost carried by --site alone: the same field is what repetition-mapping (c23) matches on.",
+      "resolution_claim_id": "c26"
+    },
+    {
+      "id": "v3",
+      "text": "Whether non-Linux hosts are in scope for the sweep. terminate_pid uses os.kill/SIGTERM/SIGKILL and _locked uses fcntl.flock (session_store.py:290-327, 696-708) \u2014 both POSIX-only, and the store is already Linux-shaped before this change. The sweep does not make it worse, but automating process termination raises the cost of the assumption if it is ever wrong.",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v4",
+      "text": "How two concurrent webglass invocations are distinguished, given _DEFAULT_CALLER = 'cli' is hardcoded for all of them (c29). Blocking because c24's caller-scoped sweep and c23's caller-scoped reuse are both unsafe under the current identity model: the sweep would reap a sibling process's sessions and reuse could hand over another task's session. Candidates: derive caller from the OS process, require an explicit --caller/--task, or scope both to ids minted by this process.",
+      "kind": "unknown_blocking",
+      "claim_id": "c29",
+      "resolved": true,
+      "resolution": "Identity follows the Playwright-MCP model: a session belongs to the client/process that opened it, and that owner \u2014 not the literal 'cli' caller string \u2014 is what scopes both the sweep (c24) and reuse (c23). An invocation may only reap or reuse sessions its own owner opened; another owner's sessions are invisible to it, exactly as one MCP server instance cannot touch another's browser.",
+      "resolution_claim_id": "c29"
+    }
+  ],
+  "scope_entries": [
+    {
+      "id": "s1",
+      "surface": "webglass/service.py (_session_for_navigation, _op_session_list/_clean)",
+      "finding": "ephemerality is inferred from operation.session_id is None (L1194), which the CLI never leaves None; session list filters by caller but not by status, so closed records count toward the 126; _op_session_clean is the only caller of store.clean in the whole package",
+      "seeds": [
+        "c2",
+        "c5"
+      ]
+    },
+    {
+      "id": "s2",
+      "surface": "webglass/cli/_factory.py (ephemeral_session, L579-655)",
+      "finding": "the finally-close contract is real and unconditional (suppress(Exception) around store.close), TTL is _EPHEMERAL_SESSION_TTL_SECONDS=300 (L216), and the stored-record design is deliberate because the browser backend resolves endpoints through the store",
+      "seeds": [
+        "c3",
+        "c2"
+      ]
+    },
+    {
+      "id": "s3",
+      "surface": "webglass/adapters/session_store.py (close/clean/_reap_browser/_purgeable/_is_running)",
+      "finding": "close terminates the browser and keeps the record as 'closed'; clean purges non-active records only past DEFAULT_RECORD_RETENTION_SECONDS=7d (L167) and expires actives past expires_at; _is_running (L264) already exists but no read path probes it",
+      "seeds": [
+        "c5",
+        "c7"
+      ]
+    },
+    {
+      "id": "s4",
+      "surface": "live state dir (~/.local/state/webglass/sessions, 272 files / 134 records)",
+      "finding": "115 closed records all browser_reaped=true & browser_was_running=true (the ephemeral close path worked); 19 'session-*' records still 'active' with dead pids, expired ~20 days ago; 0 of 134 recorded pids alive",
+      "seeds": [
+        "c3",
+        "c7",
+        "c5"
+      ]
+    },
+    {
+      "id": "s5",
+      "surface": "host process table (ps -eo pid,ppid,etimes,args)",
+      "finding": "the 187 chromium processes are one /snap/chromium/3506 desktop browser plus 186 --type= renderer children, ~7.9 days old; no process carries a --user-data-dir under the webglass state dir, so none is a WebGlass leak",
+      "seeds": [
+        "c6"
+      ]
+    },
+    {
+      "id": "s6",
+      "surface": "webglass/cli/_browser_doctor.py + cli/_commands/doctor.py",
+      "finding": "browser_checks() returns five read-only checks and none of them looks at the session store beyond state_dir_writable (L335); doctor's contract is {healthy, checks:[{id,passed,severity,message,remediation}]} with passed=True for every severity except error",
+      "seeds": [
+        "c4"
+      ]
+    },
+    {
+      "id": "s7",
+      "surface": "webglass/adapters/playwright.py (launch_detached, L416-480)",
+      "finding": "start_new_session=True detaches the browser from the CLI's process group by design, so colleague's group-kill-on-timeout cannot reap it \u2014 reaping must go through the session record, not the launch",
+      "seeds": [
+        "c8"
+      ]
+    },
+    {
+      "id": "s8",
+      "surface": "webglass/cli/_commands/session.py + page.py + explain/catalog.py",
+      "finding": "the 'throwaway session created and closed inside this invocation' wording appears in page.py:31/75/208, catalog.py:226 and session overview's Persistence section; session clean has no flags at all today (cn parser, session.py:145-148)",
+      "seeds": [
+        "c11",
+        "c5"
+      ]
+    },
+    {
+      "id": "s9",
+      "surface": "webglass/evidence.py, exploration.py, memory.py (M3, per issue #8)",
+      "finding": "unbuilt stubs; nothing in the session-lifecycle plane reads or writes them, so this work has no M3 coupling",
+      "seeds": [
+        "c10"
+      ]
+    },
+    {
+      "id": "s10",
+      "surface": "agentculture/colleague#436, #435 and docs/specs web-scout claim c37 (issue #14 body)",
+      "finding": "colleague already group-kills its own invocations and will warn above 10 sessions from its own doctor; that mitigation lives in colleague and must not be mirrored into webglass",
+      "seeds": [
+        "c9"
+      ]
+    },
+    {
+      "id": "s11",
+      "surface": "session record payload (_to_payload, session_store.py:810-843) + a live record on disk",
+      "finding": "a record carries backend_id, caller, owner, task, capability_profile_ref, created_at/expires_at/last_used_at, generation, lease, pid, user_data_dir, sandboxed, diagnostics, status, endpoint_ref (always redacted) and schema_version \u2014 no URL, host, or navigation history, so --site has nothing to filter on today",
+      "seeds": [
+        "c15",
+        "c13"
+      ]
+    },
+    {
+      "id": "s12",
+      "surface": "docs/schema-versioning.md + RECORD_SCHEMA_VERSION (session_store.py:141-144)",
+      "finding": "records version independently at 1; an additive optional field with a safe default does NOT bump, but a reader must fail closed on an unknown-higher version \u2014 so a visited-host field can land additively provided _from_payload keeps defaulting it",
+      "seeds": [
+        "c15"
+      ]
+    },
+    {
+      "id": "s13",
+      "surface": "issue #1 section 8 never-persist-by-default list + FileSessionRecord repr redaction (session_store.py:378-402)",
+      "finding": "the record model already treats endpoint_ref as secret-equivalent and suppresses the generated dataclass __repr__ to inherit redaction; any host field inherits that same scrutiny rather than rendering freely",
+      "seeds": [
+        "c16"
+      ]
+    },
+    {
+      "id": "s14",
+      "surface": "challenge pass / concurrency + failure-mode lens: session_store.py clean()/acquire_lease/create + _factory.py TTL",
+      "finding": "expires_at is set once and never extended; the 300s ephemeral TTL is shorter than a slow page load; clean() reaps ACTIVE-past-expiry by terminating the pid and deleting the profile \u2014 automating the sweep turns a latent race into a routine one",
+      "seeds": [
+        "c28"
+      ]
+    },
+    {
+      "id": "s15",
+      "surface": "challenge pass / overlooked-actors + identity lens: _factory.py:208 _DEFAULT_CALLER + measured records",
+      "finding": "caller/owner/task are all the literal 'cli' on every CLI-created record, so caller-scoping is a no-op between concurrent CLI processes \u2014 the single load-bearing assumption under both c23 and c24",
+      "seeds": [
+        "c29"
+      ]
+    },
+    {
+      "id": "s16",
+      "surface": "challenge pass / observability + reversibility lens: service.py:2179-2198 _op_session_clean vs the proposed silent sweep, effects.py local-state class",
+      "finding": "the manual path already warns about cross-caller reaping and renders reaped records; the automatic path proposed by c14 has no equivalent surface, while performing the same irreversible terminate-and-delete",
+      "seeds": [
+        "c30",
+        "c31"
+      ]
+    },
+    {
+      "id": "s17",
+      "surface": "challenge pass / adjacent-systems lens: references.py generation scoping + session_store.py list()/bump_generation",
+      "finding": "the reference model already defends against cross-generation resolution and the store already has bump_generation, so reuse is safe only if it bumps; separately list() raises on a corrupt record, which would take the new doctor check down with it",
+      "seeds": [
+        "c32",
+        "c33"
+      ]
+    },
+    {
+      "id": "s18",
+      "surface": "challenge pass / migration lens: _from_payload (session_store.py:844-856) + docs/schema-versioning.md",
+      "finding": "clean pass for the additive host field: _from_payload reads keys by name and fails closed on any schema_version mismatch, so a v1 record with an extra key loads fine on old and new binaries \u2014 c25's additive-at-version-1 requirement is genuinely safe. Residual: the check is exact inequality, so any future bump makes downgrade fatal, and its remediation text tells the user to run 'session clean', which purges",
+      "seeds": []
+    },
+    {
+      "id": "s19",
+      "surface": "challenge pass / test-isolation + operations lens: tests/conftest.py isolated_session_state",
+      "finding": "clean pass: the autouse fixture pins WEBGLASS_STATE_DIR per test and WEBGLASS_BROWSER_BACKEND=none, so an automatic sweep cannot reach a developer's real store or CI's, and the browser-free suite stays browser-free",
+      "seeds": []
+    },
+    {
+      "id": "s20",
+      "surface": "challenge pass / security + policy lens: webglass/policy.py, adapters/playwright.py route interception",
+      "finding": "not examined in depth and believed untouched: this slice changes session lifecycle only and adds no navigation path, so the d1 redirect-revalidation deviation (issue #10) is neither improved nor worsened. Recorded as unexamined rather than cleared",
+      "seeds": []
+    },
+    {
+      "id": "s21",
+      "surface": "challenge pass / concurrency lens revisited: why ownership was thought to gate the sweep",
+      "finding": "the original coupling was wrong \u2014 cross-owner reaping of an EXPIRED record is already the shipped behaviour of 'session clean' and is safe; the only unsafe case is expired-but-in-use, which is c28's liveness bug, not an identity question",
+      "seeds": [
+        "c38"
+      ]
+    }
+  ],
+  "lapses": []
+}
