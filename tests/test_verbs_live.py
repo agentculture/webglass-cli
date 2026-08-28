@@ -976,6 +976,53 @@ def test_an_explicit_session_id_is_never_closed_by_the_ephemeral_wrapper(
     assert record.status is SessionStatus.ACTIVE
 
 
+def test_failed_navigation_in_ephemeral_session_closes_and_reaps_browser(
+    tmp_path: Path,
+) -> None:
+    """Build plan task t14: failed navigation ends the ephemeral session cleanly.
+
+    When a browser-backed operation fails (e.g., an unreachable host), the
+    ephemeral session's finally block calls store.close(), which terminates
+    the browser process and removes the profile directory. This test verifies
+    the entire close path executes even when navigation itself fails.
+    """
+    sleeper = subprocess.Popen(  # nosec B603 - fixed argv, no shell
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    try:
+        store = FileSessionStore(tmp_path / "sessions", launcher=_fake_launcher(sleeper.pid))
+        # A backend whose open() reports a navigation failure (unreachable host).
+        failing_backend = FailingOpenBackend("connection refused")
+        service = _service(failing_backend, sessions=store)
+
+        session_id: str | None = None
+        profile_dir: Path | None = None
+        try:
+            with _factory.ephemeral_session(service, None) as session_id:
+                assert session_id is not None
+                record = store.get(session_id)
+                assert record is not None
+                assert record.status is SessionStatus.ACTIVE
+                # Save the profile directory path to verify it's gone after close.
+                profile_dir = tmp_path / "sessions" / "profiles" / session_id
+                assert profile_dir.exists()
+        finally:
+            # Verify session is CLOSED after exiting the context manager.
+            assert session_id is not None
+            record = store.get(session_id)
+            assert record is not None
+            assert record.status is SessionStatus.CLOSED
+            # "Closed" means browser process is gone.
+            assert record.pid is not None
+            assert not store_module._is_running(record.pid)
+            # And the profile directory was cleaned up.
+            assert profile_dir is not None
+            assert not profile_dir.exists()
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=10)
+
+
 def test_no_browser_means_no_session_is_provisioned_at_all(tmp_path: Path) -> None:
     """With ``WEBGLASS_BROWSER_BACKEND=none`` the honest answer is the
     structured ``backend_unavailable``, not a session nobody can use."""

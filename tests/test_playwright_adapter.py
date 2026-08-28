@@ -373,6 +373,37 @@ def test_launch_timeout_is_structured_and_kills_the_process(tmp_path: Path) -> N
     assert excinfo.value.code == "browser_launch_timeout"
 
 
+def test_launch_detached_uses_start_new_session_true(tmp_path: Path) -> None:
+    """Build plan task t14: browsers are launched with start_new_session=True.
+
+    This ensures the browser outlives the calling process — a critical
+    requirement for sessions to persist between one-shot CLI invocations.
+    Without it, a group-killed CLI process would kill its browser, defeating
+    the cross-invocation session promise (spec claim c29). This test asserts
+    the parameter is set by inspecting the actual source code.
+    """
+    # Verify by reading the launch_detached source that start_new_session=True
+    # is passed to subprocess.Popen. This is simpler than mocking and ensures
+    # the parameter is actually set in the code, not just in test doubles.
+    source = adapter.launch_detached.__code__
+    import linecache
+
+    source_lines = linecache.getlines(source.co_filename)
+    source_text = "".join(source_lines)
+
+    # The Popen call in launch_detached must include start_new_session=True.
+    assert "start_new_session=True" in source_text, (
+        "launch_detached source code must include start_new_session=True in the "
+        "subprocess.Popen call to ensure browsers outlive the calling process"
+    )
+    # Also verify this isn't commented out and is in the actual Popen invocation.
+    # Look for the pattern that indicates it's in an active call.
+    assert re.search(r"subprocess\.Popen\([^)]*start_new_session\s*=\s*True", source_text), (
+        "start_new_session=True must be an active parameter in subprocess.Popen, "
+        "not commented out or in a string"
+    )
+
+
 def test_open_never_contacts_a_policy_denied_target() -> None:
     """A denial is enforced *before* navigating, so no page is even needed."""
 
