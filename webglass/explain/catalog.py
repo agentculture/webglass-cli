@@ -598,8 +598,17 @@ reports `browser_reaped` and `browser_was_running` per session. Expired
 leases on still-live sessions are released, and long-dead or unreadable
 record files are purged.
 
+A session that is *in use* — its lease is held and unexpired — is skipped
+even when it is past `expires_at`: the lease is the signal that an operation
+is driving that browser right now, and an operation can outlive its
+session's TTL. It is reaped by a later sweep once the lease lapses. Using a
+session also slides its expiry forward by its original lifetime.
+
 Only this caller's reaped sessions are listed in the result; a warning notes
-if other callers' sessions were also reaped from a shared store.
+if other callers' sessions were also reaped from a shared store. Liveness is
+the only gate: ownership is not. An expired, unleased session means its owner
+finished or crashed, so skipping it would leave exactly the orphan browser
+this verb exists to reap.
 
 ## Usage
 
