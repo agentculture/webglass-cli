@@ -212,6 +212,28 @@ _DEFAULT_TASK = "cli"
 _DEFAULT_EVIDENCE_NAMESPACE = "cli"
 _DEFAULT_POLICY_PROFILE_REF = "built-in-default"
 
+
+def _new_owner_token() -> str:
+    """Mint a fresh owner token for one throwaway session (build plan t7).
+
+    ``_DEFAULT_CALLER`` is a fixed constant shared by every CLI invocation —
+    issue #14's measurement found all 134 records on the reporting host
+    carrying ``caller="cli"``, so ``caller`` distinguishes nothing between
+    concurrent invocations. The owner token exists to fix exactly that gap,
+    but only for **reuse eligibility** (claims c38/c39 supersede c35's
+    earlier sweep-filtering design): ``clean()`` stays liveness-gated and
+    owner-agnostic, because an expired record's owner is finished or
+    crashed and reaping it is safe regardless of who owned it.
+
+    Because reuse is the only consumer, a per-invocation unique id is
+    sufficient — it does not need to identify a long-lived client or survive
+    past this process. A fresh ``uuid4`` per throwaway session is exactly
+    that: unique, un-guessable, and cheap enough to mint on every call
+    without memoizing it anywhere.
+    """
+    return uuid.uuid4().hex
+
+
 #: How long an auto-created throwaway session is allowed to live. It is closed
 #: in a ``finally`` long before this matters; the TTL is the backstop for a
 #: caller killed mid-operation, so ``session clean`` reaps it promptly.
@@ -651,6 +673,7 @@ def ephemeral_session(
             now=now,
             expires_at=now + _EPHEMERAL_SESSION_TTL_SECONDS,
             capability_profile_ref=_DEFAULT_POLICY_PROFILE_REF,
+            owner_token=_new_owner_token(),
         )
     except SessionLaunchError as exc:
         # The sandbox-unavailable path lands here. It is an environment/setup
