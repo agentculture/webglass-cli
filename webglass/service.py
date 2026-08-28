@@ -805,6 +805,7 @@ class WebGlassService:
         context: WebContext,
         *,
         cancel: CancellationToken | threading.Event | None = None,
+        swept: Sequence[SessionRecord] = (),
     ) -> WebOperationResult:
         """Execute one operation and return its structured result.
 
@@ -812,6 +813,20 @@ class WebGlassService:
         Colleague tool adapter all go through, and the single exception boundary
         of the operation core: no failure mode leaves here as an exception,
         including a backend that raises something unexpected.
+
+        ``swept`` is not part of the operation: it is what the caller's
+        opportunistic session-store sweep (build plan t10,
+        :func:`webglass.cli._factory.sweep_session_store`) had already reaped
+        *before* this operation ever ran. It rides in as a side channel on
+        this call, deliberately outside ``operation`` and outside every
+        dispatch/handler path, so a caller reporting what disappeared can
+        never change what handler runs, what policy decides, or whether the
+        operation itself succeeds or fails (build plan t11; the sweep already
+        promises this at its own layer — see that function's docstring — and
+        this parameter is what lets a result actually say so without
+        threading it back through ``WebOperation``). ``_build_result``
+        attaches it unconditionally, on every lifecycle outcome, for exactly
+        that reason.
         """
         run = _Run(operation=operation, context=context, started_at=self.clock.now())
         ledger = self.ledger_for(context)
@@ -833,7 +848,7 @@ class WebGlassService:
                     "operation to reproduce, and report it with this operation id"
                 ),
             )
-        return self._build_result(run, ledger, lifecycle, error)
+        return self._build_result(run, ledger, lifecycle, error, swept=swept)
 
     # -- lifecycle scaffolding ---------------------------------------------
 
@@ -2345,8 +2360,20 @@ class WebGlassService:
         ledger: BudgetLedger,
         lifecycle: LifecycleState,
         error: OperationError | None,
+        *,
+        swept: Sequence[SessionRecord] = (),
     ) -> WebOperationResult:
-        """Render the accumulated run as a result — on every path, terminal or not."""
+        """Render the accumulated run as a result — on every path, terminal or not.
+
+        ``swept`` is attached unconditionally, before the lifecycle/error
+        branch above even runs and regardless of what it decided: the caller's
+        opportunistic sweep already happened, outside this operation, before
+        ``execute`` was called at all, so reporting it here cannot be skipped
+        by a halt or an exception and cannot be made to depend on this
+        operation's own outcome (build plan t11, criterion 1 — see
+        :meth:`execute`'s docstring on why it arrives as a parameter rather
+        than a field on ``WebOperation``).
+        """
         operation = run.operation
         trusted = dict(run.trusted)
         trusted["operation_id"] = operation.operation_id
@@ -2361,6 +2388,17 @@ class WebGlassService:
             "layer": "none",
             "note": "M1 has no cache layer; every observation on this result is live",
         }
+        # The opportunistic sweep (build plan t10) ran, if at all, before this
+        # invocation's operation was even built — it is not something this
+        # operation did. Recording its label in `known_effects` alongside the
+        # public records below is still correct: "sessions-swept" describes an
+        # effect this *invocation* is known to have caused, which is exactly
+        # what `known_effects` documents, and a caller filtering on effect
+        # labels should not have to also know to check a second field.
+        swept_public = tuple(record.to_public_dict() for record in swept)
+        known_effects = list(run.effects)
+        if swept_public and "sessions-swept" not in known_effects:
+            known_effects.append("sessions-swept")
         finished = self.clock.now()
         return WebOperationResult(
             operation_id=operation.operation_id,
@@ -2375,7 +2413,14 @@ class WebGlassService:
                 derived=dict(run.derived),
             ),
             policy_verdict=to_result_verdict(run.verdict),
-            known_effects=tuple(run.effects),
+            known_effects=tuple(known_effects),
+            # What the caller's opportunistic session-store sweep reaped
+            # before this operation ran (build plan t11) — always present,
+            # even empty, and never influenced by this operation's own
+            # success or failure (see `execute`'s and this method's
+            # docstrings). Each entry is a `SessionRecord.to_public_dict()`
+            # payload, so `endpoint_ref` never appears here.
+            swept_sessions=swept_public,
             # No evidence store exists before M3; minting ids nothing can
             # resolve would be worse than an honest empty tuple.
             evidence_refs=tuple(run.evidence_refs),
