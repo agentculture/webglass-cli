@@ -39,6 +39,7 @@ import sys
 import textwrap
 import typing
 from collections.abc import Iterator
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -371,6 +372,60 @@ def test_launch_timeout_is_structured_and_kills_the_process(tmp_path: Path) -> N
             tmp_path / "profile", executable_path=executable, timeout_seconds=0.5
         )
     assert excinfo.value.code == "browser_launch_timeout"
+
+
+def test_launch_detached_uses_start_new_session_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Build plan task t14: browsers are launched with ``start_new_session=True``.
+
+    The detach is what makes cross-invocation sessions work (spec claim c29):
+    the browser lives in its own process group, so a caller that group-kills a
+    one-shot ``webglass`` invocation on timeout cannot take the browser with
+    it. Removing it would break that silently — no test would fail and no
+    session would visibly change until a caller's timeout reaped a browser it
+    did not mean to.
+
+    Asserted by intercepting the real ``subprocess.Popen`` call rather than by
+    scanning the module's source text: a text scan passes on a match anywhere
+    in the file, including a comment or an unreachable branch, and would keep
+    passing if ``launch_detached`` stopped calling ``Popen`` at all.
+    """
+    recorded: dict[str, object] = {}
+    real_popen = subprocess.Popen
+
+    class _FakeProcess:
+        pid = 4242
+
+        def poll(self) -> int | None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _capture(argv: object, **kwargs: object) -> _FakeProcess:
+        recorded.update(kwargs)
+        recorded["argv"] = argv
+        return _FakeProcess()
+
+    monkeypatch.setattr(subprocess, "Popen", _capture)
+    monkeypatch.setattr(adapter, "chromium_executable_path", lambda: "/nonexistent/chromium")
+
+    # The launch cannot succeed (no browser really starts, so no DevTools
+    # endpoint ever appears); the timeout path is expected. What matters is
+    # the kwargs Popen was invoked with before that.
+    with suppress(adapter.BrowserLaunchError):
+        adapter.launch_detached(tmp_path, timeout_seconds=0.01)
+
+    assert real_popen is not subprocess.Popen  # the patch actually took effect
+    assert recorded, "launch_detached never called subprocess.Popen"
+    assert recorded.get("start_new_session") is True, (
+        "launch_detached must pass start_new_session=True so the browser lives "
+        "in its own process group and survives a group-killed CLI (claim c29)"
+    )
 
 
 def test_open_never_contacts_a_policy_denied_target() -> None:

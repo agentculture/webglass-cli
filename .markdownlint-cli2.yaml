@@ -23,3 +23,7 @@ ignores:
   - ".teken/**"
   # Vendored skills are cited verbatim from guildmaster — do not reformat them.
   - ".claude/skills/**"
+  # devague writes frame/plan/review artifacts here from claim text the
+  # operator typed; `devague review` regenerates them, so hand-fixing their
+  # formatting does not stick. Same rationale as .teken/** above.
+  - ".devague/**"

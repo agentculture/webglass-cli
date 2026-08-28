@@ -29,7 +29,24 @@ they are checked in this order:
 
 With none of them, a verb that needs a page reports a structured
 ``invalid_argument``; a verb that navigates (``open``) runs in a throwaway
-session that is created and closed within the invocation.
+session that is created and closed within this invocation — unless
+``$WEBGLASS_SESSION_OWNER`` declares this invocation part of a *flow*, in
+which case it may continue a session an earlier step of the same flow opened
+(``--fresh-session`` opts out per call; see :func:`_factory.ephemeral_session`).
+
+This is the same throwaway/reuse contract described in ``page overview``'s
+"Naming the page" section, ``webglass explain page open``, and ``webglass
+session overview``'s Persistence section — see
+:data:`webglass.cli._factory.DEFAULT_EPHEMERAL_CLAIM`,
+:data:`~webglass.cli._factory.FLOW_REUSE_CLAIM`, and
+:data:`~webglass.cli._factory.FRESH_SESSION_OPT_OUT_CLAIM`, and
+:data:`~webglass.cli._factory.SWEEP_DISCLOSURE_CLAIM`, which those four
+surfaces all render verbatim (build plan t15, issue #14).
+
+A session-creating invocation also sweeps expired sessions on its way past —
+time-bounded, so a large store may take several invocations to drain, and
+never on a read verb: ``swept_sessions names any expired sessions reaped on
+the way past``.
 """
 
 from __future__ import annotations
@@ -72,8 +89,14 @@ _OVERVIEW_SECTIONS = [
             "--url <url> opens the URL and applies the verb in one operation.",
             "--session-id <id> re-reads that session's live page without navigating it — "
             "the way to see what an earlier CLI invocation's press or open did.",
-            "With none of them, 'page open' runs in a throwaway session created and "
-            "closed inside the invocation, leaving no browser behind.",
+            "With none of them, 'page open' runs in a throwaway session "
+            f"{_factory.DEFAULT_EPHEMERAL_CLAIM}, leaving no browser behind — unless "
+            f"{_factory.FLOW_REUSE_CLAIM}, in which case it may continue a session an "
+            "earlier step of the same flow opened instead of opening a new one "
+            f"({_factory.FRESH_SESSION_OPT_OUT_CLAIM}).",
+            "A session-creating invocation sweeps expired sessions on its way past "
+            "(time-bounded; a read verb never sweeps): "
+            f"{_factory.SWEEP_DISCLOSURE_CLAIM}.",
         ],
     },
     {
@@ -114,21 +137,39 @@ def _run(
     ``--session-id``, :func:`webglass.cli._factory.ephemeral_session` supplies
     a throwaway session for the duration of the operation and closes it
     afterwards (see that function on why a *stored* record is required).
+
+    Because that throwaway *is* a stored session, its ephemerality has to ride
+    along on the operation: nothing downstream can tell it apart from a
+    caller-owned session by looking at the id, which is why every CLI
+    navigation used to report ``ephemeral: false`` (issue #14).
+
+    ``ephemeral_session`` also runs the opportunistic store sweep (build plan
+    t10) before it ever yields, so ``session.swept`` is already known here.
+    It rides into ``execute`` as the separate ``swept=`` parameter rather than
+    onto the operation, so a caller can see what disappeared without that
+    disclosure being able to change what this operation itself reports
+    (build plan t11).
     """
     service, context = _factory.build_invocation(args)
     requested = getattr(args, "session_id", None)
     with _factory.ephemeral_session(
-        service, requested, provision=_navigates(kind, target)
-    ) as session_id:
+        service,
+        requested,
+        provision=_navigates(kind, target),
+        reuse=not bool(getattr(args, "fresh_session", False)),
+        hosts=_factory.target_hosts(target.url if target is not None else None),
+    ) as session:
         operation = _factory.build_operation(
             service,
             context,
             kind,
             normalized_args=normalized_args,
             target=target,
-            session_id=session_id,
+            session_id=session.session_id,
+            session_ephemeral=session.ephemeral,
+            session_reused=session.reused,
         )
-        result = service.execute(operation, context)
+        result = service.execute(operation, context, swept=session.swept)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
 
 
@@ -205,7 +246,10 @@ def cmd_page_screenshot(args: argparse.Namespace) -> int:
 
 _SESSION_ID_HELP = (
     "Run in this session (from 'session create'). Without it, a page verb that "
-    "navigates runs in a throwaway session created and closed inside this invocation."
+    f"navigates runs in a throwaway session {_factory.DEFAULT_EPHEMERAL_CLAIM} — unless "
+    f"{_factory.FLOW_REUSE_CLAIM}, in which case it may continue that flow's own session "
+    f"instead ({_factory.FRESH_SESSION_OPT_OUT_CLAIM}). Such an invocation also sweeps "
+    f"expired sessions on its way past: {_factory.SWEEP_DISCLOSURE_CLAIM}."
 )
 
 
@@ -226,6 +270,16 @@ def _add_page_selection(parser: argparse.ArgumentParser, verb: str) -> None:
 def _finish(parser: argparse.ArgumentParser, handler: Any) -> None:
     """The flags and defaults every web verb shares."""
     _factory.add_policy_profile_argument(parser)
+    parser.add_argument(
+        "--fresh-session",
+        action="store_true",
+        help=(
+            "Never continue an earlier session: run in a brand-new anonymous one, "
+            "created and closed inside this invocation. Only meaningful when "
+            f"${_factory.SESSION_OWNER_ENV} declares this call part of a flow; "
+            "without that variable every call is already anonymous."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help=_JSON_HELP)
     parser.set_defaults(func=handler)
 

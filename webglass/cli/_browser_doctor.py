@@ -30,6 +30,27 @@ adapter" (spec claim c32 / honesty h29):
   commitment to the final on-disk layout of the SQLite/artifact stores — that
   placement decision is still an open park (see the M0-M2 spec's "Open
   parks" section); it may move once M3 decides that layout.
+- ``session_store_health`` (build plan task t12, issue #14) — a read-only
+  survey of the session-record store: how many records are ``active`` with
+  a live pid ("live") versus ``active`` with a dead/foreign/absent pid
+  ("stale" — exactly the "records marked active with dead pids read as live
+  forever" defect issue #14 reported), the total record count, the on-disk
+  size of the record directory, and how many record files were too corrupt
+  to parse. This is the check whose absence is why issue #14's reporter had
+  to count 126 stray records by hand. It is built entirely on
+  :meth:`~webglass.adapters.session_store.FileSessionStore.list` and
+  :meth:`~webglass.adapters.session_store.FileSessionStore.list_corrupt`
+  (issue #14 task t5's corruption-tolerant reads — a health check must not
+  be taken down by the very condition it exists to report) and on
+  :meth:`~webglass.adapters.session_store.FileSessionRecord.to_public_dict`'s
+  ``observed_liveness`` (task t3) to tell live from stale without a second
+  pid probe. It never launches a browser, never takes the store's write
+  lock, and never mutates a record. More than
+  ``_LIVE_SESSIONS_PER_OWNER_WARNING_THRESHOLD`` live sessions under one
+  owner is reported as ``severity="warning"`` (the same threshold
+  colleague#436 uses for its own doctor-style check) but, like every other
+  advisory check here, never flips ``passed`` to ``False`` — a full session
+  store is a hygiene signal, not a broken host.
 
 Severity vs. ``passed`` — a deliberate departure worth flagging
 -----------------------------------------------------------------
@@ -68,8 +89,12 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
+
+from webglass.adapters.session_store import FileSessionStore, default_sessions_dir
+from webglass.sessions import SessionStatus
 
 Check = dict[str, object]
 
@@ -80,7 +105,14 @@ __all__ = [
     "check_playwright_version",
     "check_usable_sandbox",
     "check_state_dir_writable",
+    "check_session_store_health",
 ]
+
+#: colleague#436 warns above this many *live* sessions under one owner in its
+#: own doctor-style check; matching the number here means an operator who
+#: knows one threshold knows both, and a future owner-scoped refinement
+#: (build plan task t7's owner token) can reuse it unchanged.
+_LIVE_SESSIONS_PER_OWNER_WARNING_THRESHOLD = 10
 
 #: Ubuntu 23.10+/24.04-class AppArmor restriction on unprivileged user
 #: namespace creation — the condition this module's docstring and
@@ -355,12 +387,121 @@ def check_state_dir_writable(state_dir: Path | None = None) -> Check:
     )
 
 
+def _directory_size_bytes(directory: Path) -> int:
+    """Total bytes of every regular file under ``directory``, or 0 if absent.
+
+    A read-only ``rglob`` walk — no listing is cached, nothing is opened for
+    write, and a directory that does not exist yet (no session has ever been
+    created) is a normal, zero-size state rather than an error.
+    """
+    if not directory.is_dir():
+        return 0
+    total = 0
+    # Per-entry suppression, not one try around the walk: a directory being
+    # swept concurrently loses files under us, and a single vanished entry
+    # must cost this check one file's bytes rather than the whole figure.
+    # A health check that raises is worse than one that under-reports.
+    for entry in directory.rglob("*"):
+        with suppress(OSError):
+            if entry.is_file():
+                total += entry.stat().st_size
+    return total
+
+
+def check_session_store_health(sessions_dir: Path | None = None) -> Check:
+    """Read-only live/stale/size/corruption survey of the session-record store.
+
+    See the module docstring for the full rationale. Built entirely on
+    :class:`~webglass.adapters.session_store.FileSessionStore`'s read paths
+    (:meth:`~webglass.adapters.session_store.FileSessionStore.list`,
+    :meth:`~webglass.adapters.session_store.FileSessionStore.list_corrupt`) —
+    neither takes the store's write lock, launches a browser, or mutates a
+    record, satisfying this check's own "read-only and cheap" acceptance
+    criterion.
+
+    "Live" is an ``active`` record whose ``observed_liveness`` (computed
+    fresh from a ``kill(pid, 0)`` probe, task t3) is ``"running"``; every
+    other ``active`` record — dead pid, foreign pid, or no pid at all — is
+    "stale": exactly the "records marked active with dead pids read as live
+    forever" defect issue #14 reported, because nothing today sweeps them.
+    ``closed``/``expired`` records are counted in the total but are neither
+    live nor stale — their status already says what happened to them.
+
+    Owner-scoping today is a plain ``owner`` field group-by; build plan task
+    t7 adds a dedicated owner-token field in parallel, and this function is
+    written so that refining "for one owner" to that field later only
+    changes the grouping key, not this check's shape.
+    """
+    store = FileSessionStore(sessions_dir if sessions_dir is not None else default_sessions_dir())
+    try:
+        records = store.list()
+        corrupt = store.list_corrupt()
+    except OSError as exc:
+        # t5 made the read paths tolerant of a corrupt *record*; the store
+        # directory itself can still be unreadable (permissions, a vanished
+        # mount). Report that as the finding — a health check whose job is to
+        # describe the store must not become the thing that crashes when the
+        # store is the problem.
+        return _check(
+            "session_store_health",
+            ok=True,
+            severity="warning",
+            message=f"session record store could not be read: {exc}",
+            remediation=(
+                "check that the WebGlass state directory exists and is readable "
+                "(see `webglass doctor` state_dir_writable)"
+            ),
+        )
+
+    live_by_owner: dict[str, int] = {}
+    stale_count = 0
+    for record in records:
+        if record.status is not SessionStatus.ACTIVE:
+            continue
+        if record.to_public_dict()["observed_liveness"] == "running":
+            live_by_owner[record.owner] = live_by_owner.get(record.owner, 0) + 1
+        else:
+            stale_count += 1
+
+    live_count = sum(live_by_owner.values())
+    busiest_owner, busiest_owner_live = max(
+        live_by_owner.items(), key=lambda item: item[1], default=("", 0)
+    )
+    over_threshold = busiest_owner_live > _LIVE_SESSIONS_PER_OWNER_WARNING_THRESHOLD
+    directory_size = _directory_size_bytes(store.directory)
+
+    message_parts = [
+        f"{len(records)} session record(s) ({live_count} live, {stale_count} stale)",
+        f"record directory size: {directory_size} bytes",
+    ]
+    if over_threshold:
+        message_parts.append(
+            f"owner '{busiest_owner}' has {busiest_owner_live} live sessions "
+            f"(> {_LIVE_SESSIONS_PER_OWNER_WARNING_THRESHOLD} threshold)"
+        )
+    if corrupt:
+        message_parts.append(f"{len(corrupt)} corrupt record(s) skipped")
+
+    return _check(
+        "session_store_health",
+        ok=True,
+        severity="warning" if over_threshold else "info",
+        message="; ".join(message_parts),
+        remediation=(
+            "run `webglass session clean` to sweep stale/expired sessions and reclaim disk space"
+            if (over_threshold or stale_count or corrupt)
+            else ""
+        ),
+    )
+
+
 def browser_checks() -> list[Check]:
-    """All t14 browser-capability checks, in acceptance-criteria order."""
+    """All t14+t12 browser-capability and session-store checks, in acceptance-criteria order."""
     return [
         check_playwright_importable(),
         check_chromium_installed(),
         check_playwright_version(),
         check_usable_sandbox(),
         check_state_dir_writable(),
+        check_session_store_health(),
     ]

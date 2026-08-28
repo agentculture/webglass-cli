@@ -934,7 +934,13 @@ def test_navigation_without_a_session_uses_an_unstored_ephemeral_one() -> None:
     store = InMemorySessionStore()
     service = make_service(sessions=store)
     result = open_page(service, make_context())
-    assert result.content.trusted["session"] == {"session_id": "session-1", "ephemeral": True}
+    # Both lifetime facts are always stated, never left to inference: this
+    # session is a throwaway (t2) and continues nothing (t13).
+    assert result.content.trusted["session"] == {
+        "session_id": "session-1",
+        "ephemeral": True,
+        "reused": False,
+    }
     assert store.list() == [], "an ephemeral session is never persisted"
 
 

@@ -11,6 +11,13 @@ context without chaining reads.
 
 from __future__ import annotations
 
+from webglass.cli._session_wording import (
+    DEFAULT_EPHEMERAL_CLAIM,
+    FLOW_REUSE_CLAIM,
+    FRESH_SESSION_OPT_OUT_CLAIM,
+    SWEEP_DISCLOSURE_CLAIM,
+)
+
 _ROOT = """\
 # webglass-cli
 
@@ -252,7 +259,7 @@ app under test requires naming its origin in a `--policy-profile` file's
   - `webglass explain action`
 """
 
-_PAGE_OPEN = """\
+_PAGE_OPEN = f"""\
 # webglass page open <url>
 
 Navigate a session to `url` and retain the resulting `PageSnapshot` for later
@@ -267,6 +274,19 @@ explicitly, including on a page that produced none.
 An unreachable target (connection refused, DNS failure, navigation timeout)
 is a structured `navigation_failed` result telling you to check your server:
 WebGlass never starts, stops, or supervises the app under test.
+
+## Session lifecycle
+
+Without `--session-id`, `page open` runs in a throwaway session
+{DEFAULT_EPHEMERAL_CLAIM}, leaving no browser behind — unless
+{FLOW_REUSE_CLAIM}, in which case it may continue a session an earlier step
+of the same flow opened instead of opening a new one
+({FRESH_SESSION_OPT_OUT_CLAIM}). `--session-id` re-reads a session's live
+page without navigating it; see `webglass explain session`.
+
+A session-creating invocation also sweeps expired sessions on its way past
+(time-bounded, so a large store may take several invocations to drain, and a
+read verb never sweeps): {SWEEP_DISCLOSURE_CLAIM}.
 
 ## Usage
 
@@ -560,6 +580,12 @@ _SESSION_SHOW = """\
 # webglass session show <session-id>
 
 Show one session's public record (its redacted shape — no connect endpoint).
+The record's `observed_liveness` (`running` / `dead` / `unknown`) is a
+signal-0 probe of the recorded pid taken fresh at render time, never a
+stored status: a record left `active` by a crashed caller renders as `dead`
+rather than reading as live forever, and a pid that answers but is owned by
+another user (near-certain pid reuse) reports `unknown` rather than being
+claimed as our browser. Reading never mutates the record's stored status.
 
 ## Usage
 
@@ -592,13 +618,41 @@ reports `browser_reaped` and `browser_was_running` per session. Expired
 leases on still-live sessions are released, and long-dead or unreadable
 record files are purged.
 
+A session that is *in use* — its lease is held and unexpired — is skipped
+even when it is past `expires_at`: the lease is the signal that an operation
+is driving that browser right now, and an operation can outlive its
+session's TTL. It is reaped by a later sweep once the lease lapses. Using a
+session also slides its expiry forward by its original lifetime.
+
 Only this caller's reaped sessions are listed in the result; a warning notes
-if other callers' sessions were also reaped from a shared store.
+if other callers' sessions were also reaped from a shared store. Liveness is
+the only gate: ownership is not. An expired, unleased session means its owner
+finished or crashed, so skipping it would leave exactly the orphan browser
+this verb exists to reap.
+
+`--older-than`/`--status`/`--site` narrow which records this sweep is
+allowed to touch, and compose as AND: a record must satisfy every filter
+that was passed. `--older-than` takes a number of seconds or a suffixed
+duration (`30s`, `10m`, `2h`, `7d`); a malformed value is a structured
+`invalid_argument` (exit 1), never a silently-substituted default.
+`--status` restricts to one lifecycle status (`active`/`expired`/`closed`).
+`--site` restricts to records that navigated to that host, matched against
+the record's top-level navigation set — a record with no tracked
+navigation history (pre-upgrade, or genuinely never navigated) is never
+matched by `--site`, since "unknown" and "confirmed not visited" are
+different states. These filters are evaluated inside the store under its
+per-record lock, the same one every other job in `clean` uses, so a filtered
+sweep cannot race a concurrent `clean` or lease call. An unmatched filter
+reaps nothing and exits 0, rather than falling back to an unfiltered sweep.
 
 ## Usage
 
     webglass session clean
     webglass session clean --json
+    webglass session clean --older-than 30d
+    webglass session clean --status expired
+    webglass session clean --site example.com
+    webglass session clean --older-than 1h --status active --site example.com
 """
 
 _SESSION_OVERVIEW = """\

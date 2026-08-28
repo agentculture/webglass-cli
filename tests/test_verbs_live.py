@@ -81,7 +81,9 @@ from webglass.cli import _factory, main
 from webglass.cli._errors import CliError
 from webglass.context import WebContext
 from webglass.effects import EffectClass, OperationKind
+from webglass.operations import OperationTarget
 from webglass.policy import WebPolicyEvaluator, WebPolicyProfile
+from webglass.results import LifecycleState
 from webglass.service import ERROR_NAVIGATION_FAILED, WebGlassService
 from webglass.sessions import InMemorySessionStore, SessionStatus
 
@@ -935,8 +937,10 @@ def test_an_ephemeral_session_is_created_and_closed_within_the_invocation(
     try:
         store = FileSessionStore(tmp_path / "sessions", launcher=_fake_launcher(sleeper.pid))
         service = _service(FakeBrowserBackend(_STATE_ROUTES), sessions=store)
-        with _factory.ephemeral_session(service, None) as session_id:
+        with _factory.ephemeral_session(service, None) as session:
+            session_id = session.session_id
             assert session_id is not None
+            assert session.ephemeral is True
             record = store.get(session_id)
             assert record is not None
             assert record.status is SessionStatus.ACTIVE
@@ -969,11 +973,65 @@ def test_an_explicit_session_id_is_never_closed_by_the_ephemeral_wrapper(
         expires_at=FIXED_TIME + 300.0,
         endpoint_ref="http://127.0.0.1:0/mine",
     )
-    with _factory.ephemeral_session(service, "mine") as session_id:
-        assert session_id == "mine"
+    with _factory.ephemeral_session(service, "mine") as session:
+        assert session.session_id == "mine"
+        # The caller owns this one's lifetime, so it is not ours to label
+        # throwaway.
+        assert session.ephemeral is False
     record = store.get("mine")
     assert record is not None
     assert record.status is SessionStatus.ACTIVE
+
+
+def test_failed_navigation_in_ephemeral_session_closes_and_reaps_browser(
+    tmp_path: Path,
+) -> None:
+    """Build plan task t14: failed navigation ends the ephemeral session cleanly.
+
+    When a browser-backed operation fails (e.g., an unreachable host), the
+    ephemeral session's finally block calls store.close(), which terminates
+    the browser process and removes the profile directory. This test verifies
+    the entire close path executes even when navigation itself fails.
+    """
+    sleeper = subprocess.Popen(  # nosec B603 - fixed argv, no shell
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    try:
+        store = FileSessionStore(tmp_path / "sessions", launcher=_fake_launcher(sleeper.pid))
+        # A backend whose open() reports a navigation failure (unreachable host).
+        failing_backend = FailingOpenBackend("connection refused")
+        service = _service(failing_backend, sessions=store)
+
+        session_id: str | None = None
+        profile_dir: Path | None = None
+        try:
+            # t2 changed this yield from a bare id to a ProvisionedSession
+            # carrying the id plus whether the session is invocation-scoped.
+            with _factory.ephemeral_session(service, None) as provisioned:
+                assert provisioned.ephemeral is True
+                session_id = provisioned.session_id
+                assert session_id is not None
+                record = store.get(session_id)
+                assert record is not None
+                assert record.status is SessionStatus.ACTIVE
+                # Save the profile directory path to verify it's gone after close.
+                profile_dir = tmp_path / "sessions" / "profiles" / session_id
+                assert profile_dir.exists()
+        finally:
+            # Verify session is CLOSED after exiting the context manager.
+            assert session_id is not None
+            record = store.get(session_id)
+            assert record is not None
+            assert record.status is SessionStatus.CLOSED
+            # "Closed" means browser process is gone.
+            assert record.pid is not None
+            assert not store_module._is_running(record.pid)
+            # And the profile directory was cleaned up.
+            assert profile_dir is not None
+            assert not profile_dir.exists()
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=10)
 
 
 def test_no_browser_means_no_session_is_provisioned_at_all(tmp_path: Path) -> None:
@@ -981,8 +1039,9 @@ def test_no_browser_means_no_session_is_provisioned_at_all(tmp_path: Path) -> No
     structured ``backend_unavailable``, not a session nobody can use."""
     store = FileSessionStore(tmp_path / "sessions")
     service = _service(None, sessions=store)
-    with _factory.ephemeral_session(service, None) as session_id:
-        assert session_id is None
+    with _factory.ephemeral_session(service, None) as session:
+        assert session.session_id is None
+        assert session.ephemeral is False
     assert not (tmp_path / "sessions").exists() or store.list() == []
 
 
@@ -1021,9 +1080,113 @@ def test_a_lens_over_a_retained_snapshot_provisions_nothing(tmp_path: Path) -> N
 
     store = FileSessionStore(tmp_path / "sessions", launcher=launch)
     service = _service(FakeBrowserBackend({}), sessions=store)
-    with _factory.ephemeral_session(service, None, provision=False) as session_id:
-        assert session_id is None
+    with _factory.ephemeral_session(service, None, provision=False) as session:
+        assert session.session_id is None
+        assert session.ephemeral is False
     assert launched == []
+
+
+def _pidless_launcher() -> store_module.SessionLauncher:
+    """A launcher that records an endpoint but no process to reap.
+
+    The ephemerality-reporting tests below care about what the *record* says,
+    not about process lifetime (which
+    ``test_an_ephemeral_session_is_created_and_closed_within_the_invocation``
+    already proves by pid), so they deliberately mint nothing to kill.
+    """
+
+    def launch(session_id: str, user_data_dir: Path) -> LaunchedBrowser:
+        return LaunchedBrowser(
+            endpoint=f"http://127.0.0.1:0/{session_id}",
+            pid=None,
+            user_data_dir=str(user_data_dir),
+            sandboxed=True,
+        )
+
+    return launch
+
+
+def test_a_cli_provisioned_throwaway_session_reports_itself_ephemeral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue #14: ``ephemeral`` must describe the session, not the argv.
+
+    ``ephemeral_session`` hands the operation a *real stored* session id (the
+    browser backend resolves an endpoint through the store, so an unstored id
+    has no browser to reach). Inferring ephemerality from ``session_id is
+    None`` therefore reported ``false`` for every CLI navigation — including
+    the throwaway one the CLI had just minted and was about to close. The fact
+    now travels on the operation, so the label matches the lifetime.
+    """
+    store = FileSessionStore(tmp_path / "sessions", launcher=_pidless_launcher())
+    _install_service(monkeypatch, _service(FakeBrowserBackend(_STATE_ROUTES), sessions=store))
+
+    rc = main(["page", "open", _STATE_URL, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    session = payload["content"]["trusted"]["session"]
+    assert session["ephemeral"] is True
+    # And it really was a stored record, closed on the way out — the label is
+    # honest about a session that exists, not a way of saying "none was used".
+    records = store.list()
+    assert [r.session_id for r in records] == [session["session_id"]]
+    assert records[0].status is SessionStatus.CLOSED
+
+
+def test_a_caller_owned_session_still_reports_itself_non_ephemeral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """h2 (library/CLI parity): the same field, the other answer.
+
+    A session the caller created and named outlives the operation, so it must
+    read ``ephemeral: false`` — and from the *same* field the throwaway case
+    reads, never a CLI-only code path.
+    """
+    store = FileSessionStore(tmp_path / "sessions", launcher=_pidless_launcher())
+    service = _service(FakeBrowserBackend(_STATE_ROUTES), sessions=store)
+    _install_service(monkeypatch, service)
+    _seed_session(service, "mine")
+
+    rc = main(["page", "open", _STATE_URL, "--session-id", "mine", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    session = payload["content"]["trusted"]["session"]
+    assert session["session_id"] == "mine"
+    assert session["ephemeral"] is False
+    record = store.get("mine")
+    assert record is not None
+    assert record.status is SessionStatus.ACTIVE
+
+
+def test_a_library_caller_navigating_a_session_it_created_is_not_ephemeral() -> None:
+    """The library half of the same parity claim, with no CLI in the picture.
+
+    A ``WebOperation`` built by hand defaults ``session_ephemeral`` to
+    ``False``: only the component that *owns* the throwaway lifetime sets it.
+    """
+    service = _service(FakeBrowserBackend(_STATE_ROUTES))
+    context = _context()
+    created = service.execute(
+        _factory.build_operation(service, context, OperationKind.SESSION_CREATE), context
+    )
+    session_id = created.content.trusted["session"]["session_id"]
+
+    operation = _factory.build_operation(
+        service,
+        context,
+        OperationKind.PAGE_OPEN,
+        target=OperationTarget(url=_STATE_URL),
+        session_id=session_id,
+    )
+    assert operation.session_ephemeral is False
+    result = service.execute(operation, context)
+    assert result.lifecycle_state is LifecycleState.SUCCEEDED
+    assert result.content.trusted["session"] == {
+        "session_id": session_id,
+        "ephemeral": False,
+        # Nor is it a session continued from an earlier step of a flow (t13).
+        "reused": False,
+    }
 
 
 def test_the_default_browser_backend_is_playwright() -> None:
@@ -1420,11 +1583,11 @@ def test_live_ephemeral_page_open_leaves_no_browser_behind(
         "--json",
     )
     assert payload["lifecycle_state"] == "succeeded"
-    # The result's own ``ephemeral`` flag means "the *operation* was given no
-    # session", and it was given one — the CLI provisioned a real record so the
-    # backend had an endpoint to resolve. The throwaway-ness is a property of
-    # that record's lifetime, asserted below, not of the operation's input.
-    assert payload["content"]["trusted"]["session"]["ephemeral"] is False
+    # The result's ``ephemeral`` flag describes the session's *lifetime*, not
+    # whether argv named one: the CLI provisioned a real record (the backend
+    # needs an endpoint to resolve) and closes it below, so the honest label
+    # is true. It used to read false here, which is issue #14's mislabelling.
+    assert payload["content"]["trusted"]["session"]["ephemeral"] is True
 
     store = FileSessionStore(Path(live_env[STATE_DIR_ENV]) / "sessions")
     records = store.list()

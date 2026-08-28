@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-08-28
+
+### Fixed
+
+- The session `owner_token` value is no longer rendered in `to_public_dict()`; only `owner_token_set` is. The token is the eligibility key for session reuse, and that rendering is not owner-scoped -- `swept_sessions` carries records the owner-agnostic sweep reaped, which can belong to other owners (PR #15 review).
+
+## [0.8.2] - 2026-08-28
+
+### Fixed
+
+- A budgeted sweep always started at the same lexicographic record, so with a budget that only covers the first N, records near the tail could starve indefinitely. The sweep now rotates its start (PR #15 review).
+- `session clean --site` compared a raw command-line value against lower-cased stored hosts, so `--site EXAMPLE.com` never matched `example.com` (PR #15 review).
+- A record spared from reaping by an --older-than/--status/--site filter kept an expired lease, leaving it reading as in-use to the next caller (PR #15 review).
+- `doctor`'s session-store check could raise instead of reporting: an unreadable state directory escaped as an OSError, and a file vanishing mid-walk broke the size figure. Both now degrade to a warning (PR #15 review).
+
+## [0.8.1] - 2026-08-28
+
+### Fixed
+
+- A lease could silently override a shorter caller-requested session TTL: `session create --ttl-seconds 1` acquired a 30s lease whose expiry floored the record's, producing a 30-second session. The lease no longer extends the record it claims.
+- `session create` left its lease held after the one-shot invocation exited, making the record un-reapable for the lease's full TTL. It now releases the lease it took.
+
+## [0.8.0] - 2026-08-28
+
+### Added
+
+- `session clean` filter flags: `--older-than`, `--status`, and `--site`, evaluated inside the store under its per-record lock so they cannot race a concurrent invocation (t9).
+- A time-bounded opportunistic sweep on session-creating invocations, so the session store no longer depends on anyone remembering to run `session clean`. Never runs on a read verb (t10).
+- `doctor` gains a `session_store_health` check reporting record counts, live/stale split, directory size, and corrupt records; warns above 10 live sessions per owner without ever failing doctor's exit code (t12).
+- Session records carry the top-level navigation hosts they visited, capped at 32, never subresource hosts. Unknown (pre-upgrade) hosts stay distinguishable from empty (t8).
+- Session records carry an `owner_token`, used for reuse eligibility only (t7).
+- Flow-scoped session reuse, opt-in via `$WEBGLASS_SESSION_OWNER`, with `--fresh-session` as the per-call opt-out. Off by default; reuse bumps the session generation so stale element references still fail safely (t13).
+- Results disclose `swept_sessions` — what the opportunistic sweep reaped — as trusted control metadata (t11).
+- Records render `observed_liveness` (running/dead/unknown); a pid alive but owned by another user is never claimed as ours (t3).
+
+### Changed
+
+- Record retention dropped from 7 days to 3. The window exists so repeated visits can be mapped for reuse, not as a forensics window (t4).
+- `clean()` is gated on liveness, not ownership: a record holding a live lease is skipped, and `acquire_lease` now slides `expires_at` forward (t6).
+- Store read paths survive a corrupt record instead of raising; `list_corrupt()` reports which records were skipped (t5).
+- `_reap_browser` no longer signals a pid it cannot prove is ours (t6).
+
+### Fixed
+
+- A CLI-provisioned throwaway session reported `ephemeral: false` on every navigation, because ephemerality was inferred from `session_id is None` while the CLI always supplied a real id. The fact now travels on the operation (issue #14, t2).
+- Nothing ever swept the session store — `store.clean` had exactly one caller, the manual verb — so records and orphaned profile directories accumulated indefinitely (issue #14, t10).
+- A record marked `active` whose browser process was long dead read as live forever (issue #14, t3).
+
 ## [0.7.0] - 2026-08-24
 
 ### Added

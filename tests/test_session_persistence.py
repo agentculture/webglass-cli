@@ -815,19 +815,53 @@ def test_clean_purges_long_dead_records_but_keeps_recent_ones(tmp_path: Path) ->
 
 def test_a_corrupt_record_is_loud_and_clean_is_the_recovery_path(tmp_path: Path) -> None:
     """Never "no such session": that would hand out a fresh browser while an
-    unreachable one kept running."""
+    unreachable one kept running.
+
+    ``get()`` stays loud by session id -- a caller who asked for exactly this
+    session deserves to know it is broken, not ``None`` (indistinguishable
+    from "never existed"). ``list()`` is a different contract: it enumerates
+    *every* record, and one corrupt file among many must not take the whole
+    read down (task t5, issue #14) -- it is skipped and reported separately
+    through :meth:`FileSessionStore.list_corrupt`.
+    """
     store = _store(tmp_path)
     _create(store)
     (tmp_path / "sessions" / "sess-1.json").write_text("{not json", encoding="utf-8")
 
     with pytest.raises(SessionRecordError):
         store.get("sess-1")
-    with pytest.raises(SessionRecordError):
-        store.list()
+    assert store.list() == []
+    corrupt = store.list_corrupt()
+    assert len(corrupt) == 1
+    assert corrupt[0].session_id == "sess-1"
+    assert "not valid JSON" in corrupt[0].error
 
     assert store.clean(now=2000.0) == []
     assert store.list() == []
+    assert store.list_corrupt() == []
     assert store.get("sess-1") is None
+
+
+def test_list_survives_a_corrupt_record_among_good_ones(
+    session_store: FileSessionStore,
+    seed_session_records,
+) -> None:
+    """A health check built on ``list()`` (task t12's doctor session-store
+    check) must not be taken down by the very condition it exists to report
+    (issue #14 task t5). Seeds good records through the t1 harness, then
+    plants a corrupt file alongside them the way a half-written record or a
+    disk fault would produce one.
+    """
+    seeded = seed_session_records(count=2, status=SessionStatus.CLOSED)
+    (session_store.directory / "corrupt-record.json").write_text("{not json", encoding="utf-8")
+
+    records = session_store.list()
+    assert {record.session_id for record in records} == {r.session_id for r in seeded}
+
+    corrupt = session_store.list_corrupt()
+    assert [c.session_id for c in corrupt] == ["corrupt-record"]
+    assert "not valid JSON" in corrupt[0].error
+    assert str(session_store.directory / "corrupt-record.json") in corrupt[0].path
 
 
 def test_a_record_from_another_schema_version_is_refused(tmp_path: Path) -> None:

@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -804,6 +805,7 @@ class WebGlassService:
         context: WebContext,
         *,
         cancel: CancellationToken | threading.Event | None = None,
+        swept: Sequence[SessionRecord] = (),
     ) -> WebOperationResult:
         """Execute one operation and return its structured result.
 
@@ -811,6 +813,20 @@ class WebGlassService:
         Colleague tool adapter all go through, and the single exception boundary
         of the operation core: no failure mode leaves here as an exception,
         including a backend that raises something unexpected.
+
+        ``swept`` is not part of the operation: it is what the caller's
+        opportunistic session-store sweep (build plan t10,
+        :func:`webglass.cli._factory.sweep_session_store`) had already reaped
+        *before* this operation ever ran. It rides in as a side channel on
+        this call, deliberately outside ``operation`` and outside every
+        dispatch/handler path, so a caller reporting what disappeared can
+        never change what handler runs, what policy decides, or whether the
+        operation itself succeeds or fails (build plan t11; the sweep already
+        promises this at its own layer — see that function's docstring — and
+        this parameter is what lets a result actually say so without
+        threading it back through ``WebOperation``). ``_build_result``
+        attaches it unconditionally, on every lifecycle outcome, for exactly
+        that reason.
         """
         run = _Run(operation=operation, context=context, started_at=self.clock.now())
         ledger = self.ledger_for(context)
@@ -832,7 +848,7 @@ class WebGlassService:
                     "operation to reproduce, and report it with this operation id"
                 ),
             )
-        return self._build_result(run, ledger, lifecycle, error)
+        return self._build_result(run, ledger, lifecycle, error, swept=swept)
 
     # -- lifecycle scaffolding ---------------------------------------------
 
@@ -1182,6 +1198,45 @@ class WebGlassService:
                 )
         return record
 
+    def _session_generation(self, session_id: str) -> int:
+        """The generation to stamp on a snapshot taken in ``session_id``.
+
+        Element references are scoped to a ``snapshot_id`` *and* a generation
+        (:mod:`webglass.references`), and the generation is where a session's
+        own history enters that scope. A session whose store record has been
+        bumped — which is what reusing a session across two invocations of one
+        flow does (build plan t13) — mints snapshots at the new generation, so
+        a reference the caller was holding from before the reuse is refused as
+        stale rather than resolved against whatever element now sits at that
+        index.
+
+        A session with no stored record (the unstored id a caller-less
+        navigation mints, or an in-memory store that never heard of it)
+        generation-stamps at ``0``: there is no history to have left behind.
+        """
+        store = self.sessions
+        if store is None:
+            return 0
+        record = store.get(session_id)
+        return 0 if record is None else int(getattr(record, "generation", 0) or 0)
+
+    def _session_identity(self, run: _Run) -> dict[str, Any]:
+        """The trusted control metadata naming the session an operation ran in.
+
+        One helper, so a navigation and a live re-read describe the session
+        identically: which session, whether this invocation owns its
+        throwaway lifetime, and whether it is one an earlier step of the same
+        flow opened (build plan t13). Both lifetime facts are read off the
+        *operation* — only the component that provisioned the session knows
+        them, and inferring either one from the id is the mislabelling issue
+        #14 reported.
+        """
+        return {
+            "session_id": str(run.operation.session_id),
+            "ephemeral": bool(run.operation.session_ephemeral),
+            "reused": bool(run.operation.session_reused),
+        }
+
     def _session_for_navigation(self, run: _Run) -> tuple[str, dict[str, Any]]:
         """Resolve the browser session a navigation runs in.
 
@@ -1189,13 +1244,71 @@ class WebGlassService:
         that is deliberately not stored: an anonymous, unshared context is the
         safe default (issue #1 section 2, "isolated per caller/task"), and
         persisting one would create session state no caller asked for.
+
+        Otherwise the reported ``ephemeral`` flag is read off the operation's
+        ``session_ephemeral``, never inferred from the id being absent. A
+        caller can hand us a session id *and* own its throwaway lifetime — the
+        CLI does exactly that for a one-shot navigation, because the browser
+        backend resolves a connect endpoint through the session store, so an
+        unstored id reaches no browser. Inferring from ``session_id is None``
+        therefore labelled every CLI navigation ``ephemeral: false``, the
+        mislabelling issue #14 reported. Library and CLI now render the same
+        field from the same source.
+
+        ``reused`` rides the same path for the same reason (build plan t13):
+        a session an earlier invocation of this flow opened is
+        indistinguishable, by its id, from one created a moment ago, so the
+        operation carries the fact and the result reports it.
         """
         session_id = run.operation.session_id
         if session_id is None:
             ephemeral = self.ids.new_id("session")
-            return ephemeral, {"session_id": ephemeral, "ephemeral": True}
+            return ephemeral, {"session_id": ephemeral, "ephemeral": True, "reused": False}
         self._require_session(run, session_id, lease=True)
-        return session_id, {"session_id": session_id, "ephemeral": False}
+        return session_id, self._session_identity(run)
+
+    def _record_navigated_hosts(
+        self, session_id: str, requested_url: str, hops: Sequence[NavigationHop]
+    ) -> None:
+        """Note on the session record which *document* hosts this navigation reached.
+
+        This is the whole of build plan t8's write path, and where it sits is
+        the design:
+
+        * **Here, not in the Playwright adapter.** Every browser backend
+          reaches this line, so the record does not depend on which adapter
+          answered — and this is the layer that already re-checks the chain
+          (:meth:`_check_navigation`), so "the hosts we navigated to" is
+          derived from the same list policy is evaluated against, never a
+          second, divergent one.
+        * **Navigation commit only, never a request hook.** A ``page.on(
+          "request")`` listener in the adapter would see every subresource —
+          CDNs, fonts, analytics, third-party frames — turning a handful of
+          entries into a heavy browsing log nobody asked for. ``browser.open``
+          *is* the top-level navigation, so hooking it is what makes ``clean
+          --site`` mean what it reads.
+        * **Before the policy re-check, not after.** By the time this runs the
+          browser has already been to these hosts; a hop that
+          :meth:`_check_navigation` is about to refuse was still *contacted*
+          (see CLAUDE.md's known deviation d1), and a session that touched a
+          host should be findable by ``--site`` whether or not the caller was
+          allowed to see what came back.
+
+        The store method is optional (it is a ``FileSessionStore`` field, not
+        part of the ``SessionStore`` protocol) and an unstored ephemeral
+        session resolves to no record, so both degrade to recording nothing —
+        never to a failed navigation. A store that raises while recording
+        A filesystem failure while writing the record must not fail a
+        navigation that already succeeded either — the caller's answer is the
+        page, and the host set is a best-effort mapping — so ``OSError`` is
+        suppressed. Only that: anything else escaping the store is a bug, and
+        a bug that silently eats itself here would be invisible.
+        """
+        recorder = getattr(self.sessions, "record_navigated_urls", None)
+        if recorder is None:
+            return
+        with suppress(OSError):
+            recorder(session_id, _chain_urls(requested_url, hops))
 
     # -- reference helpers --------------------------------------------------
 
@@ -1398,6 +1511,7 @@ class WebGlassService:
         opened = browser.open(session_id, url)
         elapsed = max(0.0, self.clock.now() - started)
         run.navigation.extend(opened.redirect_chain)
+        self._record_navigated_hosts(session_id, url, opened.redirect_chain)
         run.effect("network-request")
         run.effect("navigation-occurred")
         run.effect("browser-state-may-change")
@@ -1497,6 +1611,7 @@ class WebGlassService:
             requested_url=requested_url,
             final_url=opened.final_url,
             retrieved_at=_iso(self.clock.now()),
+            generation=self._session_generation(session_id),
             status=opened.status,
             redirect_chain=tuple(
                 hop.response_url if hop.response_url is not None else hop.requested_url
@@ -1632,7 +1747,12 @@ class WebGlassService:
         run.backend = self._backend_label(browser)
         session_id = str(run.operation.session_id)
         self._require_session(run, session_id, lease=True)
-        run.trusted["session"] = {"session_id": session_id, "ephemeral": False, "live_read": True}
+        run.trusted["session"] = {
+            # Read off the operation, not assumed — same fields, same source
+            # as _session_for_navigation (issue #14; build plan t13).
+            **self._session_identity(run),
+            "live_read": True,
+        }
 
         reader = getattr(browser, "current", None)
         if not callable(reader):
@@ -2119,9 +2239,18 @@ class WebGlassService:
             expires_at=now + ttl,
             capability_profile_ref=run.context.policy_profile_ref,
         )
-        outcome = store.acquire_lease(
-            record.session_id, self._lease_holder(run.context), now, DEFAULT_LEASE_TTL_SECONDS
-        )
+        holder = self._lease_holder(run.context)
+        outcome = store.acquire_lease(record.session_id, holder, now, DEFAULT_LEASE_TTL_SECONDS)
+        # Release it again immediately. `session create` proves the session is
+        # exclusively ours by taking the lease, but the invocation ends here —
+        # nothing is using the session once this process exits, and a lease
+        # left behind would make the record un-reapable for the lease's full
+        # TTL. That is strictly wrong when the caller asked for a shorter
+        # session than the lease: `--ttl-seconds 1` would leave a record no
+        # sweep could touch for thirty seconds (issue #14 follow-up). A caller
+        # that actually intends to use the session acquires its own lease.
+        if not isinstance(outcome, LeaseRefusal):
+            store.release_lease(record.session_id, holder)
         run.effect("session-created")
         # to_public_dict() is the only session serialization used anywhere in
         # this module: endpoint_ref is secret-equivalent and never leaves the
@@ -2185,7 +2314,29 @@ class WebGlassService:
     ) -> None:
         store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
-        reaped = store.clean(self.clock.now())
+        older_than_seconds = self._arg(run, "older_than_seconds", default=None)
+        status_raw = self._arg(run, "status", default=None)
+        site = self._arg(run, "site", default=None)
+        status: SessionStatus | None = None
+        if status_raw is not None:
+            try:
+                status = SessionStatus(status_raw)
+            except ValueError as exc:
+                valid = ", ".join(member.value for member in SessionStatus)
+                raise _Halt(
+                    LifecycleState.FAILED,
+                    OperationError(
+                        code=ERROR_INVALID_ARGUMENT,
+                        message=f"unknown session status: {status_raw!r}",
+                        remediation=f"use one of: {valid}",
+                    ),
+                ) from exc
+        reaped = store.clean(
+            self.clock.now(),
+            older_than_seconds=older_than_seconds,
+            status=status,
+            site=site,
+        )
         mine = [record for record in reaped if record.caller == run.context.caller]
         others = len(reaped) - len(mine)
         run.effect("sessions-expired")
@@ -2218,8 +2369,20 @@ class WebGlassService:
         ledger: BudgetLedger,
         lifecycle: LifecycleState,
         error: OperationError | None,
+        *,
+        swept: Sequence[SessionRecord] = (),
     ) -> WebOperationResult:
-        """Render the accumulated run as a result — on every path, terminal or not."""
+        """Render the accumulated run as a result — on every path, terminal or not.
+
+        ``swept`` is attached unconditionally, before the lifecycle/error
+        branch above even runs and regardless of what it decided: the caller's
+        opportunistic sweep already happened, outside this operation, before
+        ``execute`` was called at all, so reporting it here cannot be skipped
+        by a halt or an exception and cannot be made to depend on this
+        operation's own outcome (build plan t11, criterion 1 — see
+        :meth:`execute`'s docstring on why it arrives as a parameter rather
+        than a field on ``WebOperation``).
+        """
         operation = run.operation
         trusted = dict(run.trusted)
         trusted["operation_id"] = operation.operation_id
@@ -2234,6 +2397,17 @@ class WebGlassService:
             "layer": "none",
             "note": "M1 has no cache layer; every observation on this result is live",
         }
+        # The opportunistic sweep (build plan t10) ran, if at all, before this
+        # invocation's operation was even built — it is not something this
+        # operation did. Recording its label in `known_effects` alongside the
+        # public records below is still correct: "sessions-swept" describes an
+        # effect this *invocation* is known to have caused, which is exactly
+        # what `known_effects` documents, and a caller filtering on effect
+        # labels should not have to also know to check a second field.
+        swept_public = tuple(record.to_public_dict() for record in swept)
+        known_effects = list(run.effects)
+        if swept_public and "sessions-swept" not in known_effects:
+            known_effects.append("sessions-swept")
         finished = self.clock.now()
         return WebOperationResult(
             operation_id=operation.operation_id,
@@ -2248,7 +2422,14 @@ class WebGlassService:
                 derived=dict(run.derived),
             ),
             policy_verdict=to_result_verdict(run.verdict),
-            known_effects=tuple(run.effects),
+            known_effects=tuple(known_effects),
+            # What the caller's opportunistic session-store sweep reaped
+            # before this operation ran (build plan t11) — always present,
+            # even empty, and never influenced by this operation's own
+            # success or failure (see `execute`'s and this method's
+            # docstrings). Each entry is a `SessionRecord.to_public_dict()`
+            # payload, so `endpoint_ref` never appears here.
+            swept_sessions=swept_public,
             # No evidence store exists before M3; minting ids nothing can
             # resolve would be worse than an honest empty tuple.
             evidence_refs=tuple(run.evidence_refs),

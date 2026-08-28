@@ -56,6 +56,29 @@ DEFAULT_LEASE_TTL_SECONDS = 30.0
 
 _REDACTED = "<redacted>"
 
+#: Dataclass field-metadata key that keeps a field's *value* out of
+#: :meth:`SessionRecord.__repr__`, which renders ``<name>=<redacted>``
+#: instead. :attr:`SessionRecord.endpoint_ref` is redacted unconditionally
+#: because it is secret-equivalent; a subclass field opts in through this
+#: key when its value is sensitive for some other reason
+#: (``FileSessionRecord.hosts`` is browsing history — build plan t8).
+#:
+#: It exists because the base ``__repr__`` enumerates
+#: ``dataclasses.fields(self)`` on the *instance*, so a subclass field is
+#: printed by the inherited redacting repr with no way to opt out short of
+#: overriding that repr — and overriding it is precisely the mistake
+#: ``FileSessionRecord``'s ``repr=False`` exists to prevent.
+REPR_REDACTED = "webglass.repr_redacted"
+
+
+def _repr_redacted(field: dataclasses.Field[Any]) -> bool:
+    """Whether ``field``'s value must not appear in a ``repr()``.
+
+    ``endpoint_ref`` is named explicitly rather than carrying the metadata
+    itself so the redaction survives a subclass redeclaring the field.
+    """
+    return field.name == "endpoint_ref" or bool(field.metadata.get(REPR_REDACTED))
+
 
 class SessionStatus(str, Enum):
     """Lifecycle status of a :class:`SessionRecord`."""
@@ -131,12 +154,22 @@ class SessionRecord:
     endpoint_ref: str = ""
 
     def __repr__(self) -> str:  # pragma: no cover - trivial formatting
-        rendered = ", ".join(
+        """Every field, except that redacted ones render as ``<redacted>``.
+
+        ``endpoint_ref`` is always redacted; any other field (including one
+        declared by a subclass) opts in with ``metadata={REPR_REDACTED: True}``.
+        The redacted names are still *shown* — a repr that dropped them would
+        hide the fact that the record carries them at all.
+        """
+        shown = ", ".join(
             f"{f.name}={getattr(self, f.name)!r}"
             for f in dataclasses.fields(self)
-            if f.name != "endpoint_ref"
+            if not _repr_redacted(f)
         )
-        return f"{type(self).__name__}({rendered}, endpoint_ref={_REDACTED})"
+        hidden = ", ".join(
+            f"{f.name}={_REDACTED}" for f in dataclasses.fields(self) if _repr_redacted(f)
+        )
+        return f"{type(self).__name__}({shown}, {hidden})"
 
     def to_public_dict(self) -> dict[str, Any]:
         """A dict safe for JSON output, logs, or evidence: no ``endpoint_ref``.
@@ -211,8 +244,26 @@ class SessionStore(Protocol):
         (see the module docstring and ``tests/test_sessions.py``).
         """
 
-    def clean(self, now: float) -> list[SessionRecord]:
-        """Expire sessions past their ``expires_at`` and return what was reaped."""
+    def clean(
+        self,
+        now: float,
+        *,
+        older_than_seconds: float | None = None,
+        status: SessionStatus | None = None,
+        site: str | None = None,
+    ) -> list[SessionRecord]:
+        """Expire sessions past their ``expires_at`` and return what was reaped.
+
+        ``older_than_seconds``/``status``/``site`` (build plan t9, issue #14)
+        narrow *which* records this sweep is allowed to touch, and compose as
+        AND: a record must satisfy every filter that was passed to be
+        eligible. ``None`` for a given filter means "no constraint from this
+        one" — the historical no-argument ``clean(now)`` call stays exactly
+        as permissive as before. Implementations must evaluate these under
+        the same per-record lock the rest of ``clean`` uses, never via a
+        caller reading the result and filtering afterwards: a read-then-act
+        split would race a concurrent ``clean``/lease call between the two.
+        """
 
     def acquire_lease(
         self,
@@ -301,15 +352,57 @@ class InMemorySessionStore:
             record.status = SessionStatus.CLOSED
             record.lease = None
 
-    def clean(self, now: float) -> list[SessionRecord]:
+    def clean(
+        self,
+        now: float,
+        *,
+        older_than_seconds: float | None = None,
+        status: SessionStatus | None = None,
+        site: str | None = None,
+    ) -> list[SessionRecord]:
         with self._lock:
             reaped: list[SessionRecord] = []
             for record in self._records.values():
-                if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
-                    record.status = SessionStatus.EXPIRED
-                    record.lease = None
-                    reaped.append(record)
+                if not self._is_reapable(
+                    record, now, older_than_seconds=older_than_seconds, status=status, site=site
+                ):
+                    continue
+                record.status = SessionStatus.EXPIRED
+                record.lease = None
+                reaped.append(record)
             return reaped
+
+    @staticmethod
+    def _is_reapable(
+        record: SessionRecord,
+        now: float,
+        *,
+        older_than_seconds: float | None,
+        status: SessionStatus | None,
+        site: str | None,
+    ) -> bool:
+        """Whether ``clean`` should expire this record, filters included.
+
+        Split out of :meth:`clean` so the loop states the action and this
+        states the predicate. Mirrors ``FileSessionStore._reapable``'s
+        semantics for the fields an in-memory record actually has.
+        """
+        if record.status is not SessionStatus.ACTIVE or record.expires_at > now:
+            return False
+        if status is not None and record.status is not status:
+            return False
+        if older_than_seconds is not None and (now - record.expires_at) < older_than_seconds:
+            return False
+        if site is not None:
+            # The base SessionRecord carries no navigation history at all
+            # (that is FileSessionRecord's t8 addition), so an in-memory
+            # record can never be known to have visited anywhere -- same
+            # "unknown is not a match" rule as the file store's
+            # ``hosts is None`` case.
+            hosts = getattr(record, "hosts", None)
+            if hosts is None or site not in hosts:
+                return False
+        return True
 
     def acquire_lease(
         self,

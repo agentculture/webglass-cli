@@ -17,14 +17,45 @@ logic in handlers" (spec honesty h2).
 from __future__ import annotations
 
 import argparse
+import re
 from typing import Any
 
-from webglass.cli import _factory
+from webglass.cli import _factory, _session_wording
 from webglass.cli._commands.overview import emit_overview
+from webglass.cli._errors import EXIT_USER_ERROR, CliError
 from webglass.effects import OperationKind
+from webglass.sessions import SessionStatus
+
+#: Accepts a bare number of seconds ("90"), or a number suffixed with one of
+#: s(econds)/m(inutes)/h(ours)/d(ays) ("30s", "10m", "2h", "7d"). Anchored on
+#: both ends so trailing garbage ("10mX") is rejected rather than truncated.
+_DURATION_RE = re.compile(r"^(?P<amount>\d+(?:\.\d+)?)(?P<unit>[smhd]?)$")
+_DURATION_UNIT_SECONDS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
 
 #: Shared ``--json`` help text; every verb in this noun takes the flag.
 _JSON_HELP = "Emit structured JSON."
+
+
+def _parse_older_than(raw: str) -> float:
+    """Parse ``--older-than`` into seconds, or raise a structured ``CliError``.
+
+    A malformed duration is a user-input error surfaced through the CLI's
+    own error contract (exit 1, ``{code, message, remediation}``) — never a
+    silently-substituted default. A typo'd duration must fail loudly rather
+    than quietly reap nothing (or, worse, fall back to unfiltered) (issue
+    #14 build plan t9, spec honesty h5).
+    """
+    match = _DURATION_RE.match(raw.strip()) if raw else None
+    if match is None:
+        raise CliError(
+            EXIT_USER_ERROR,
+            f"invalid --older-than duration: {raw!r}",
+            "use a number of seconds, optionally suffixed with s/m/h/d, "
+            "e.g. '90', '30s', '10m', '2h', '7d'",
+        )
+    amount = float(match.group("amount"))
+    return amount * _DURATION_UNIT_SECONDS[match.group("unit")]
+
 
 _OVERVIEW_SECTIONS = [
     {
@@ -34,7 +65,8 @@ _OVERVIEW_SECTIONS = [
             "session list — this caller's own sessions.",
             "session show <session-id> — one session's public record.",
             "session close <session-id> — close a session (touches no evidence/exploration).",
-            "session clean — reap this store's expired sessions.",
+            "session clean [--older-than DURATION] [--status STATUS] [--site HOST] — "
+            "reap this store's expired sessions, optionally filtered.",
             "session overview — this description.",
         ],
     },
@@ -50,8 +82,32 @@ _OVERVIEW_SECTIONS = [
             "Concurrent use is serialized by a lease: a second holder gets a structured "
             "refusal rather than sharing one live browser, and a crashed holder's lease "
             "frees itself at expiry.",
+            "A session-creating page verb (e.g. 'page open') without --session-id runs in "
+            f"a throwaway session {_session_wording.DEFAULT_EPHEMERAL_CLAIM} — unless "
+            f"{_session_wording.FLOW_REUSE_CLAIM}, in which case it may continue a session "
+            "an earlier step of the same flow opened, matched by the host it last visited, "
+            f"instead of opening a new one ({_session_wording.FRESH_SESSION_OPT_OUT_CLAIM}). "
+            "A reused session is retained rather than closed; results report which "
+            "happened as 'session_reused'. See 'webglass explain page open'.",
+            "A session-creating invocation sweeps expired sessions on its way past, so the "
+            "store does not depend on anyone running 'session clean'. The sweep is "
+            "time-bounded (a large store may take several invocations to drain) and never "
+            f"runs on a read verb: {_session_wording.SWEEP_DISCLOSURE_CLAIM}.",
+            "Each record's status/pid are checked against the running process and reported "
+            "as observed_liveness (running/dead/unknown); a record whose browser process is "
+            "gone is dead regardless of its stored status.",
+            "A session record becomes eligible for reaping once it is closed, expired, or "
+            "dead, and it is older than the 3-day retention window. Every session-creating "
+            "invocation also spends a small, time-bounded slice sweeping this store on its "
+            "own, so records do not silently pile up between explicit runs of "
+            "'session clean' — the sweep may still leave records behind if it runs out of "
+            "its time budget first.",
             "session clean reaps expired sessions, terminates their browser processes, "
-            "and removes their profile directories.",
+            "and removes their profile directories. --older-than/--status/--site narrow "
+            "which records are eligible and compose as AND; an unmatched filter reaps "
+            "nothing rather than falling back to reaping everything. --site matches a "
+            "record's top-level navigation hosts (capped at 32) and cannot match a "
+            "pre-upgrade record whose hosts are unknown.",
         ],
     },
     {
@@ -79,12 +135,35 @@ def _no_verb(args: argparse.Namespace) -> int:
 
 
 def _run(
-    kind: OperationKind, args: argparse.Namespace, *, normalized_args: dict[str, Any] | None = None
+    kind: OperationKind,
+    args: argparse.Namespace,
+    *,
+    normalized_args: dict[str, Any] | None = None,
+    sweep: bool = False,
 ) -> int:
+    """Build one operation, execute it, render it. No operation logic here.
+
+    ``sweep`` is the opportunistic session-store sweep (build plan t10), and
+    only ``create`` passes it. It runs before the operation and entirely
+    outside its result: whatever it reaped — or failed to — cannot change
+    what the caller is told about the session they asked for. Every other
+    verb in this noun *reads* the store (or, for ``clean``, sweeps it because
+    that is what was asked), and a read verb that quietly rewrote the store
+    it was asked to describe would be deleting the evidence out from under
+    exactly the investigation issue #14 was.
+
+    What it reaped still has to be told to the caller (build plan t11), so it
+    is threaded into ``execute`` as the separate ``swept=`` parameter rather
+    than dropped on the floor here — that keeps the disclosure outside the
+    operation itself while still making it reachable on the result.
+    """
     service = _factory.build_service()
     context = _factory.build_context()
+    swept: tuple[Any, ...] = ()
+    if sweep:
+        swept = _factory.sweep_session_store(service)
     operation = _factory.build_operation(service, context, kind, normalized_args=normalized_args)
-    result = service.execute(operation, context)
+    result = service.execute(operation, context, swept=swept)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
 
 
@@ -94,7 +173,7 @@ def cmd_session_create(args: argparse.Namespace) -> int:
         normalized["ttl_seconds"] = args.ttl_seconds
     if args.session_id is not None:
         normalized["session_id"] = args.session_id
-    return _run(OperationKind.SESSION_CREATE, args, normalized_args=normalized)
+    return _run(OperationKind.SESSION_CREATE, args, normalized_args=normalized, sweep=True)
 
 
 def cmd_session_list(args: argparse.Namespace) -> int:
@@ -110,7 +189,14 @@ def cmd_session_close(args: argparse.Namespace) -> int:
 
 
 def cmd_session_clean(args: argparse.Namespace) -> int:
-    return _run(OperationKind.SESSION_CLEAN, args)
+    normalized: dict[str, Any] = {}
+    if args.older_than is not None:
+        normalized["older_than_seconds"] = _parse_older_than(args.older_than)
+    if args.status is not None:
+        normalized["status"] = args.status
+    if args.site is not None:
+        normalized["site"] = args.site
+    return _run(OperationKind.SESSION_CLEAN, args, normalized_args=normalized)
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -147,5 +233,31 @@ def register(sub: argparse._SubParsersAction) -> None:
     cl.set_defaults(func=cmd_session_close)
 
     cn = noun_sub.add_parser("clean", help="Reap this store's expired sessions.")
+    cn.add_argument(
+        "--older-than",
+        default=None,
+        metavar="DURATION",
+        help=(
+            "Only reap records at least this old. A number of seconds, optionally "
+            "suffixed with s/m/h/d, e.g. '90', '30s', '10m', '2h', '7d'. Composes as "
+            "AND with --status/--site."
+        ),
+    )
+    cn.add_argument(
+        "--status",
+        choices=[member.value for member in SessionStatus],
+        default=None,
+        help="Only reap records currently at this status. Composes as AND with the others.",
+    )
+    cn.add_argument(
+        "--site",
+        default=None,
+        metavar="HOST",
+        help=(
+            "Only reap records that navigated to this host. A record with no tracked "
+            "navigation history (pre-upgrade, or never navigated) is never matched. "
+            "Composes as AND with the others."
+        ),
+    )
     cn.add_argument("--json", action="store_true", help=_JSON_HELP)
     cn.set_defaults(func=cmd_session_clean)

@@ -100,18 +100,21 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from webglass.sessions import (
     DEFAULT_LEASE_TTL_SECONDS,
+    REPR_REDACTED,
     Lease,
     LeaseGrant,
     LeaseRefusal,
@@ -122,10 +125,13 @@ from webglass.sessions import (
 __all__ = [
     "ALLOW_UNSANDBOXED_ENV",
     "DEFAULT_RECORD_RETENTION_SECONDS",
+    "MAX_NAVIGATED_HOSTS",
+    "NAVIGATED_HOSTS_TRUNCATED",
     "PROFILES_DIRNAME",
     "RECORD_SCHEMA_VERSION",
     "SESSIONS_DIRNAME",
     "STATE_DIR_ENV",
+    "CorruptSessionRecord",
     "FileSessionRecord",
     "FileSessionStore",
     "LaunchedBrowser",
@@ -164,7 +170,27 @@ _FILE_MODE = 0o600
 #: purges it. Closed/expired records stay readable by ``session show`` for a
 #: while (an agent asking "what happened to my session?" deserves an answer),
 #: but not forever — an unbounded directory of dead records is a disk leak.
-DEFAULT_RECORD_RETENTION_SECONDS = 7 * 24 * 60 * 60.0
+#: The 3-day window is kept so repeated visits can be found and mapped for
+#: reuse, not as a forensics window.
+DEFAULT_RECORD_RETENTION_SECONDS = 3 * 24 * 60 * 60.0
+
+#: Hard cap on :attr:`FileSessionRecord.hosts`. A session that navigates to
+#: more than this many *distinct* hosts keeps the first ones it saw and drops
+#: the rest — the record is a bounded mapping for ``clean --site`` and reuse
+#: matching, not a browsing log, and an unbounded per-session list would grow
+#: without limit under a long-lived session or a redirect loop. 32 is well
+#: past what an ordinary research session touches at the *document* level
+#: (subresource hosts are never recorded at all), so hitting it is a signal
+#: in itself.
+MAX_NAVIGATED_HOSTS = 32
+
+#: Appended once to :attr:`FileSessionRecord.diagnostics` when the host set
+#: hits :data:`MAX_NAVIGATED_HOSTS` and a genuinely new host had to be
+#: dropped. Dropping silently would let a bounded prefix read as a complete
+#: history; declaring the omission is the invariant ("every omission is
+#: declared", CLAUDE.md section 11) and it tells ``--site`` consumers that an
+#: absent host is no longer proof of absence for this record.
+NAVIGATED_HOSTS_TRUNCATED = "navigated-hosts-truncated"
 
 #: Session ids become filenames, so they are validated rather than trusted:
 #: ``../`` or an absolute path in a caller-supplied ``--session-id`` must never
@@ -261,16 +287,139 @@ def default_sessions_dir(environ: Mapping[str, str] | None = None) -> Path:
     return default_state_root(environ) / SESSIONS_DIRNAME
 
 
-def _is_running(pid: int) -> bool:
+#: The three outcomes of probing a pid with ``kill(pid, 0)``. ``"foreign"`` is
+#: split out from ``"running"`` because the two answer different questions:
+#: *is something alive at this pid* (yes, for both) versus *is that something
+#: our browser* (yes only for ``"running"``) — see :func:`_pid_liveness`.
+_PidLiveness = str  # "running" | "dead" | "foreign"
+
+
+def _pid_liveness(pid: int) -> _PidLiveness:
+    """Probe ``pid`` with a signal-0 ``kill`` and classify what answered.
+
+    ``"dead"`` — ``ProcessLookupError``: nothing with this pid exists.
+
+    ``"foreign"`` — ``PermissionError``: something with this pid exists, but
+    the OS refuses to let us signal it because it belongs to another user.
+    On a long-lived host this is overwhelmingly pid reuse *after* our
+    browser already exited, not our own browser somehow surviving under a
+    different uid — the pid space wrapped around and the OS handed our old
+    number to someone else's process. Callers must never fold this into
+    "our browser is alive" (spec honesty h4); see ``to_public_dict``'s
+    ``observed_liveness`` field, which reports it as ``"unknown"`` rather
+    than claiming the process as ours.
+
+    ``"running"`` — the signal was accepted: a process we are allowed to
+    signal exists at this pid.
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return "dead"
     except PermissionError:
-        # Alive, but owned by someone else — see terminate_pid on why this
-        # store refuses to escalate against it.
-        return True
-    return True
+        return "foreign"
+    return "running"
+
+
+def _is_running(pid: int) -> bool:
+    """Whether *something* answers at ``pid`` — collapses ``"foreign"`` into
+    "yes" because this predicate is used by :func:`terminate_pid` to decide
+    whether to keep waiting/escalate, not to decide ownership. Anything
+    needing the ownership distinction uses :func:`_pid_liveness` directly."""
+    return _pid_liveness(pid) != "dead"
+
+
+def _lease_is_live(record: FileSessionRecord, now: float) -> bool:
+    """Whether ``record`` is leased *right now* — the store's liveness signal.
+
+    A lease is taken for the duration of one operation and released after
+    it, so "leased and not yet expired" is the closest thing this store has
+    to "a caller is driving this browser at this instant". :meth:`
+    FileSessionStore.clean` treats it as veto: see its docstring for why
+    liveness gates the sweep and ownership deliberately does not.
+    """
+    lease = record.lease
+    return lease is not None and lease.expires_at > now
+
+
+def _slid_expiry(record: FileSessionRecord, now: float) -> float:
+    """``record``'s expiry, slid forward to give it its full life again.
+
+    The record's original TTL needs no stored field, because the store
+    maintains ``expires_at - last_used_at == <the TTL it was created with>``
+    as an invariant: :meth:`FileSessionStore.create` writes
+    ``last_used_at = now`` and ``expires_at = now + ttl``, and every slide
+    here moves both by the same amount. Reading the lifetime back off that
+    difference is what keeps this change additive — no new record field, no
+    ``RECORD_SCHEMA_VERSION`` bump, and a record written by an older
+    WebGlass slides correctly the first time it is used.
+
+    ``max``-shaped so this can only ever *extend* a life: a record whose
+    ``expires_at`` already precedes its ``last_used_at`` (only reachable by
+    hand-writing a record file) yields a non-positive lifetime, and is left
+    exactly as it is rather than being retroactively shortened or resurrected.
+
+    The lease is deliberately **not** a floor here. An earlier version made
+    it one, reasoning that a record should never expire while a lease is
+    still held — but that inverts the caller's intent whenever the default
+    lease TTL is longer than the session's own: ``session create
+    --ttl-seconds 1`` then acquired a 30s lease and silently became a 30s
+    session. A lease is a claim *on* a session, so it is the lease that gets
+    capped to the record's lifetime (see
+    :meth:`FileSessionStore.acquire_lease`), never the record that gets
+    stretched to the lease.
+    """
+    lifetime = record.expires_at - record.last_used_at
+    return max(record.expires_at, now + lifetime)
+
+
+def _hosts_from_urls(urls: Iterable[str]) -> list[str]:
+    """The hostnames of ``urls``, lower-cased, deduplicated, in first-seen order.
+
+    ``urlsplit(...).hostname`` is doing the privacy work here, not a regex:
+    it lower-cases the host, strips the port, and — the part that matters —
+    strips any ``user:password@`` userinfo, so a credential embedded in a URL
+    cannot reach the record even by accident. Everything else about the URL
+    (path, query, fragment) is discarded, because the record is a host-level
+    mapping and never a browsing log.
+
+    A URL with no host at all (``about:blank``, a ``data:`` URL, the empty
+    string) contributes nothing rather than an empty-string entry.
+    """
+    hosts: list[str] = []
+    for url in urls:
+        try:
+            hostname = urlsplit(url).hostname
+        except ValueError:
+            # A URL the stdlib parser rejects (e.g. a malformed IPv6 literal)
+            # is not a host we can record; it is also not an error worth
+            # failing a navigation over.
+            continue
+        if not hostname:
+            continue
+        host = hostname.lower()
+        if host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _merge_hosts(existing: tuple[str, ...], new: Iterable[str]) -> tuple[tuple[str, ...], bool]:
+    """Add ``new`` hosts to ``existing``, capped. Returns the set and whether it overflowed.
+
+    "Overflowed" means a host that was *not* already present had to be
+    dropped — re-visiting a host already in a full set is not an omission and
+    does not raise the flag.
+    """
+    merged = list(existing)
+    truncated = False
+    for host in new:
+        if host in merged:
+            continue
+        if len(merged) >= MAX_NAVIGATED_HOSTS:
+            truncated = True
+            continue
+        merged.append(host)
+    return tuple(merged), truncated
 
 
 def _reap_child(pid: int) -> None:
@@ -385,6 +534,72 @@ class FileSessionRecord(SessionRecord):
         The outcome of a close/clean: whether this store terminated the
         browser, and whether it found it alive to terminate. ``None`` means
         no attempt was made.
+    ``owner_token``
+        A per-invocation token identifying the *client* that created this
+        session — distinct from :attr:`caller`, which is a fixed constant
+        (``"cli"``) shared by every CLI-issued operation and therefore
+        useless for telling concurrent invocations apart (build plan t7,
+        issue #14 claims c35/c38/c39). Scoped **narrowly**: it exists only to
+        decide whether a *later* invocation may treat an existing session as
+        "mine" for reuse — see :func:`webglass.cli._factory.ephemeral_session`,
+        which mints a fresh one with ``uuid4`` on every throwaway session it
+        creates. It deliberately does **not** gate :meth:`FileSessionStore.clean`:
+        c38/c39 supersede the earlier design, because an expired record's
+        owner is by definition finished or crashed, so reaping it is safe
+        regardless of who owned it — and owner-filtering the sweep would make
+        it useless (a one-shot invocation owns exactly one session and would
+        reap nothing). Liveness gates the sweep; ownership gates reuse only.
+        Defaults to ``""``, which means "no token was ever recorded" — a
+        pre-upgrade record loaded through :func:`_from_payload` gets this
+        default, and ``""`` is never treated as a wildcard or as equal to any
+        real owner's token, so an old record is claimed by nobody's reuse
+        query. Not a secret (unlike :attr:`~webglass.sessions.SessionRecord.
+        endpoint_ref`, it grants no control over the browser by itself), so it
+        is rendered in both ``repr()`` and :meth:`to_public_dict`.
+
+    ``hosts``
+        The **top-level document hosts this session actually navigated to**,
+        first-seen order, deduplicated, capped at :data:`MAX_NAVIGATED_HOSTS`
+        (build plan t8, issue #14). Two consumers need it: ``session clean
+        --site`` (t9) filters on it, and reuse repetition-mapping (t13)
+        matches on it.
+
+        Three properties make it safe to keep at all:
+
+        * **Navigation only, never subresources.** Recording every host the
+          browser touched would sweep in CDNs, fonts, analytics, and
+          third-party frames — noisy, and a far heavier privacy surface. The
+          only writer is the navigation-commit seam in
+          ``WebGlassService._open``; there is no request hook anywhere, and
+          ``tests/test_navigated_hosts.py`` asserts the call-site count
+          structurally so a later one cannot appear quietly.
+        * **Host-level facts only.** Never a path, query, fragment, port,
+          page content, cookie, or credential — :func:`_hosts_from_urls`
+          keeps only ``urlsplit(...).hostname``, which also strips any
+          ``user:password@`` userinfo before it can reach disk. This is
+          proto-Web-memory (issue #1 section 2): it answers "have we seen
+          this?" and is never a credential store.
+        * **Unknown is not empty.** ``None`` — the default, and what a record
+          written before this field existed loads as — means *no host data
+          was ever tracked for this session*. ``()`` means *tracked, and it
+          went nowhere*. ``--site`` may reap on the second and must never
+          reap on the first, so the two states stay distinguishable all the
+          way to disk. An untracked record also stays untracked:
+          :meth:`FileSessionStore.record_navigated_urls` refuses to merge
+          into ``None``, because a set built from post-upgrade navigations
+          alone would look complete while omitting everywhere that session
+          had already been.
+
+        Kept out of ``repr()`` (``metadata={REPR_REDACTED: True}``) but
+        present in :meth:`to_public_dict` — a deliberate, *different* call
+        from :attr:`owner_token`, which is in both. ``repr()`` surfaces in
+        tracebacks, debuggers, assertion messages, and any log line that
+        formats a record, none of which is scoped to the session's owner, and
+        browsing history should not leak there. ``to_public_dict`` *is*
+        caller-scoped (``session list`` returns only the caller's own
+        sessions) and is the one rendering that makes retained data
+        inspectable — and data a caller cannot see is data they cannot
+        knowingly forget, which is the persistence rule this field inherits.
 
     ``repr=False`` is load-bearing, not style: ``@dataclass`` generates a
     ``__repr__`` by default, and a generated one would print *every* field —
@@ -399,9 +614,29 @@ class FileSessionRecord(SessionRecord):
     diagnostics: tuple[str, ...] = ()
     browser_reaped: bool = False
     browser_was_running: bool | None = None
+    owner_token: str = ""
+    hosts: tuple[str, ...] | None = field(default=None, metadata={REPR_REDACTED: True})
 
     def to_public_dict(self) -> dict[str, Any]:
-        """The base record's safe dict, plus the process facts — never the endpoint."""
+        """The base record's safe dict, plus the process facts — never the endpoint.
+
+        ``observed_liveness`` is computed fresh on every call from a live
+        ``kill(pid, 0)`` probe (spec claim c7 / honesty h4): it is an
+        *observed fact at render time*, not a stored field and not something
+        this method ever writes back to the record or the file on disk — a
+        record marked ``active`` with a long-dead pid renders as ``"dead"``
+        on this and every future call, forever, until something actually
+        reaps it (``session clean``/``close``, a separate write path). Values:
+
+        * ``"running"`` — the pid answered and we are allowed to signal it;
+        * ``"dead"`` — nothing answers at that pid any more;
+        * ``"unknown"`` — no pid was ever recorded, *or* a pid answered but
+          belongs to another user (see :func:`_pid_liveness`) — that case is
+          deliberately not reported as ``"running"``: it is almost always
+          pid reuse after our browser already exited, and claiming it as
+          "ours, alive" would be exactly the false confidence this field
+          exists to prevent.
+        """
         payload = super().to_public_dict()
         payload.update(
             {
@@ -411,9 +646,54 @@ class FileSessionRecord(SessionRecord):
                 "diagnostics": list(self.diagnostics),
                 "browser_reaped": self.browser_reaped,
                 "browser_was_running": self.browser_was_running,
+                "observed_liveness": self._observed_liveness(),
+                # NOT the owner token. It is not a secret in the credential
+                # sense, but it *is* the eligibility key for session reuse
+                # (`find_reusable_session` matches on it), and this rendering
+                # is not owner-scoped: t11's `swept_sessions` reports records
+                # the owner-agnostic sweep reaped, which can belong to other
+                # owners. Disclosing the key there would let one flow claim
+                # another's session. A caller identifies its own sessions by
+                # the token it minted, not by reading it back. (PR #15 review.)
+                "owner_token_set": bool(self.owner_token),
+                # ``None`` (never tracked) survives as JSON ``null``, and is
+                # not flattened to ``[]``: the two mean different things and
+                # a caller filtering on hosts must be able to tell them apart.
+                "hosts": None if self.hosts is None else list(self.hosts),
             }
         )
         return payload
+
+    def _observed_liveness(self) -> str:
+        """See ``observed_liveness`` in :meth:`to_public_dict`'s docstring."""
+        if self.pid is None:
+            return "unknown"
+        liveness = _pid_liveness(self.pid)
+        if liveness == "foreign":
+            return "unknown"
+        return liveness
+
+
+@dataclass(frozen=True)
+class CorruptSessionRecord:
+    """A session record file that exists but cannot be parsed, as reportable data.
+
+    :meth:`FileSessionStore.list` used to raise :class:`SessionRecordError`
+    the moment it hit one bad file (build plan task t12's doctor
+    session-store check would have inherited that: a health check must not
+    be taken down by the very condition it exists to report — issue #14
+    task t5). Reads now tolerate a corrupt record the same way
+    :meth:`FileSessionStore.clean` already does, but a read path must not
+    silently swallow the corruption either — this is the data a caller
+    (``session list``, and later the doctor check) renders instead of the
+    record it could not load. Deliberately carries no file contents: the
+    bytes that failed to parse might not even be JSON, so there is nothing
+    safe to echo back beyond the id, path, and parser's own message.
+    """
+
+    session_id: str
+    path: str
+    error: str
 
 
 class FileSessionStore:
@@ -460,6 +740,7 @@ class FileSessionStore:
         expires_at: float,
         capability_profile_ref: Any = None,
         endpoint_ref: str = "",
+        owner_token: str = "",
     ) -> FileSessionRecord:
         """Create, persist, and (if a launcher is wired) launch a session.
 
@@ -467,6 +748,14 @@ class FileSessionStore:
         launch — that is how a caller attaches a session record to a browser
         it started itself, and how the endpoint-secrecy tests plant a known
         secret without needing Chromium.
+
+        ``owner_token`` is not part of the :class:`~webglass.sessions.SessionStore`
+        protocol (it is a :class:`FileSessionRecord`-only field, build plan
+        t7) — an optional keyword with a safe ``""`` default, so every
+        existing caller of this method keeps compiling and behaving exactly
+        as before. It is the caller's job to mint a fresh one per invocation
+        (see :func:`webglass.cli._factory.ephemeral_session`); this method
+        only stores whatever it is handed.
         """
         _validate_session_id(session_id)
         with self._locked(session_id):
@@ -489,6 +778,11 @@ class FileSessionStore:
                 lease=None,
                 endpoint_ref=endpoint_ref,
                 diagnostics=notes,
+                owner_token=owner_token,
+                # Tracked from birth, and *known* empty: this store watched
+                # the session from its first instant, so "no hosts yet" is a
+                # fact about it, not an absence of data (build plan t8).
+                hosts=(),
             )
             if not endpoint_ref and self.launcher is not None:
                 self._launch(record)
@@ -507,12 +801,49 @@ class FileSessionStore:
         return self._read_unlocked(session_id)
 
     def list(self) -> list[FileSessionRecord]:
-        """Every stored record, oldest first. Raises on a corrupt one."""
-        records = [self._read_unlocked(sid) for sid in self._session_ids()]
-        return sorted(
-            (record for record in records if record is not None),
-            key=lambda record: (record.created_at, record.session_id),
-        )
+        """Every readable record, oldest first.
+
+        Tolerates a corrupt record file the same way :meth:`clean` does —
+        one unparseable record must not take down a read of every other
+        session (issue #14 task t5; a doctor health check is built on this
+        exact path). The record is skipped here, never purged (only
+        :meth:`clean` mutates); call :meth:`list_corrupt` to see what was
+        skipped and why.
+        """
+        records, _corrupt = self._list_all()
+        return records
+
+    def list_corrupt(self) -> list[CorruptSessionRecord]:
+        """Record files :meth:`list` had to skip because they would not parse.
+
+        A read path must not silently swallow corruption — this is how a
+        caller (``session list``, and the doctor session-store check built
+        on top of this store) learns *which* record is broken without
+        :meth:`list` itself raising.
+        """
+        _records, corrupt = self._list_all()
+        return corrupt
+
+    def _list_all(self) -> tuple[list[FileSessionRecord], list[CorruptSessionRecord]]:
+        records: list[FileSessionRecord] = []
+        corrupt: list[CorruptSessionRecord] = []
+        for session_id in self._session_ids():
+            try:
+                record = self._read_unlocked(session_id)
+            except SessionRecordError as exc:
+                corrupt.append(
+                    CorruptSessionRecord(
+                        session_id=session_id,
+                        path=str(self._record_path(session_id)),
+                        error=str(exc),
+                    )
+                )
+                continue
+            if record is not None:
+                records.append(record)
+        records.sort(key=lambda record: (record.created_at, record.session_id))
+        corrupt.sort(key=lambda item: item.session_id)
+        return records, corrupt
 
     def close(self, session_id: str) -> None:
         """Close a session and stop its browser.
@@ -530,15 +861,75 @@ class FileSessionStore:
             record.lease = None
             self._write_unlocked(record)
 
-    def clean(self, now: float) -> list[FileSessionRecord]:
+    def record_navigated_urls(
+        self, session_id: str, urls: Iterable[str]
+    ) -> FileSessionRecord | None:
+        """Fold the hosts of ``urls`` into this session's :attr:`~FileSessionRecord.hosts`.
+
+        Called from exactly one place — the navigation-commit seam in
+        ``WebGlassService._open``, once per navigation, with the requested URL
+        plus every hop the backend actually navigated. Callers hand over
+        *URLs*, not hosts, on purpose: reducing a URL to its host is the
+        privacy boundary of this field, and it is enforced here, at the
+        storage edge, rather than trusted to each caller (see
+        :func:`_hosts_from_urls`).
+
+        Returns the updated record, or ``None`` when there was nothing to
+        update. Every "nothing to update" case is a silent no-op rather than
+        an error, because none of them is a reason to fail the navigation
+        that triggered it:
+
+        * no URL carried a host (``about:blank`` and friends);
+        * the session id names no record — an *unstored* ephemeral session
+          (the anonymous default) reaches here and must never cause a record
+          file to spring into existence;
+        * the record file is unreadable — :meth:`clean` is the one path that
+          repairs corruption, not this one;
+        * the record's host set is ``None`` — an untracked, pre-upgrade
+          record stays honestly untracked rather than acquiring a set that
+          looks complete but only covers navigations since the upgrade.
+
+        Not part of the :class:`~webglass.sessions.SessionStore` protocol: the
+        service calls it only if the injected store offers it, so a store that
+        does not track hosts (``InMemorySessionStore``) still navigates fine.
+        """
+        hosts = _hosts_from_urls(urls)
+        if not hosts or not _valid_session_id(session_id):
+            return None
+        with self._locked(session_id):
+            try:
+                record = self._read_unlocked(session_id)
+            except SessionRecordError:
+                return None
+            if record is None or record.hosts is None:
+                return None
+            merged, truncated = _merge_hosts(record.hosts, hosts)
+            newly_truncated = truncated and NAVIGATED_HOSTS_TRUNCATED not in record.diagnostics
+            if merged == record.hosts and not newly_truncated:
+                return record
+            record.hosts = merged
+            if newly_truncated:
+                record.diagnostics = record.diagnostics + (NAVIGATED_HOSTS_TRUNCATED,)
+            self._write_unlocked(record)
+            return record
+
+    def clean(
+        self,
+        now: float,
+        *,
+        older_than_seconds: float | None = None,
+        status: SessionStatus | None = None,
+        site: str | None = None,
+        time_budget_seconds: float | None = None,
+    ) -> list[FileSessionRecord]:
         """Reap expired sessions, their browsers, and their leftovers.
 
         Four separate jobs, in one deterministic pass:
 
-        1. an **active session past its ``expires_at``** becomes ``expired``,
-           its browser is terminated, and its profile directory is removed —
-           this is what keeps a crashed caller from leaving an orphan browser
-           alive forever;
+        1. an **active session past its ``expires_at`` that nobody is using**
+           becomes ``expired``, its browser is terminated, and its profile
+           directory is removed — this is what keeps a crashed caller from
+           leaving an orphan browser alive forever;
         2. an **expired lease on a still-live session** is dropped, so the
            next caller sees a free session rather than inferring liveness from
            a timestamp;
@@ -549,33 +940,182 @@ class FileSessionStore:
 
         Only case 1 is returned — those are the sessions a caller would call
         "reaped", and the service renders exactly them.
+
+        **Liveness gates case 1; ownership does not.** A record with a held,
+        unexpired lease is skipped whatever its ``expires_at`` says: a lease
+        is the one signal this store has that a browser is *in use right
+        now*, and killing a browser mid-operation is far worse than letting
+        a record live a few seconds past its clock (issue #14 task t6, spec
+        claim c28 / honesty h24). It becomes reapable again the moment the
+        lease lapses. Conversely a record belonging to a *different* owner is
+        reaped on exactly the same terms as our own — an expired, unleased
+        session means its owner finished or crashed, and refusing to reap it
+        would recreate the orphan-browser leak this method exists to prevent
+        (claim c38). The service says so out loud, reporting how many of the
+        sessions it reaped belonged to other callers.
+
+        ``older_than_seconds``/``status``/``site`` (issue #14 task t9) gate
+        the two jobs that actually remove or expire something — case 1 and
+        case 3 — and compose as AND: a record must satisfy every filter that
+        was passed. They deliberately do **not** touch case 2 (lease
+        bookkeeping) or case 4 (corrupt-file removal): neither of those is a
+        "reap" in the caller's sense, and a record whose file cannot even be
+        read has nothing left to filter on. An unmatched filter reaps
+        nothing rather than falling back to reaping everything — a
+        ``--older-than`` that matches no record is a normal, successful
+        clean of zero sessions, never a silent "clean everything instead".
+        These are evaluated right here, under the same per-record lock every
+        other job in this loop uses, precisely so a caller can never read a
+        record, decide it matches, and act on it in a way that races a
+        concurrent ``clean`` or lease call in between.
+
+        ``time_budget_seconds`` (issue #14 task t10) makes the pass
+        **partial on purpose**: the deadline is checked before each record
+        and the loop stops the moment it passes, leaving the rest of the
+        store for the next caller. It exists for the opportunistic sweep
+        that now runs inside session-creating invocations — housekeeping the
+        caller did not ask for must never become the reason their page open
+        felt slow — and is measured on a monotonic clock rather than on
+        ``now``, because ``now`` is the *store's* logical time (often a
+        fixed test clock) while this bound is about wall-clock latency. The
+        default of ``None`` is unbounded, which is what the explicit
+        ``session clean`` verb wants: a caller who asked for a clean store
+        should get the whole store cleaned. Because the check happens
+        between records, a pass can overrun the budget by the cost of the
+        single record it is already working on; callers pick a budget with
+        room for that.
         """
+        deadline = None if time_budget_seconds is None else time.monotonic() + time_budget_seconds
         reaped: list[FileSessionRecord] = []
-        for session_id in self._session_ids():
+        for session_id in self._sweep_order():
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             with self._locked(session_id):
-                try:
-                    record = self._read_unlocked(session_id)
-                except SessionRecordError:
-                    self._purge_unlocked(session_id)
-                    continue
-                if record is None:
-                    continue
-                if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
-                    record.status = SessionStatus.EXPIRED
-                    record.lease = None
-                    self._reap_browser(record)
-                    self._write_unlocked(record)
-                    reaped.append(record)
-                elif (
-                    record.status is SessionStatus.ACTIVE
-                    and record.lease is not None
-                    and record.lease.expires_at <= now
-                ):
-                    record.lease = None
-                    self._write_unlocked(record)
-                elif record.status is not SessionStatus.ACTIVE and self._purgeable(record, now):
-                    self._purge_unlocked(session_id)
+                expired = self._clean_one_unlocked(
+                    session_id,
+                    now,
+                    older_than_seconds=older_than_seconds,
+                    status=status,
+                    site=site,
+                )
+            if expired is not None:
+                reaped.append(expired)
         return reaped
+
+    def _clean_one_unlocked(
+        self,
+        session_id: str,
+        now: float,
+        *,
+        older_than_seconds: float | None,
+        status: SessionStatus | None,
+        site: str | None,
+    ) -> FileSessionRecord | None:
+        """Run :meth:`clean`'s four jobs against one already-locked record.
+
+        Extracted from :meth:`clean` so the loop reads as "for each record,
+        under its lock, do the work" and the per-record decision tree lives in
+        one place. Returns the record only for job 1 (an active session
+        expired and reaped), which is exactly what ``clean`` reports; the
+        other three jobs are side effects with nothing to report.
+
+        The caller holds the lock — every path here is ``_unlocked``.
+        """
+        try:
+            record = self._read_unlocked(session_id)
+        except SessionRecordError:
+            # Job 4: an unreadable record file. Purging is the only recovery.
+            self._purge_unlocked(session_id)
+            return None
+        if record is None:
+            return None
+        if _lease_is_live(record, now):
+            # In use. Not expired-but-idle, not orphaned: in use.
+            return None
+
+        filtered = self._reapable(
+            record, now, older_than_seconds=older_than_seconds, status=status, site=site
+        )
+        if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
+            if not filtered:
+                # Filtered out of job 1, but job 2 still applies: a lease whose
+                # holder is gone is stale regardless of why this record was
+                # spared, and leaving it would keep the record looking busy.
+                self._drop_dead_lease_unlocked(record, now)
+                return None
+            # Job 1: expire it, stop its browser, report it.
+            record.status = SessionStatus.EXPIRED
+            record.lease = None
+            self._reap_browser(record)
+            self._write_unlocked(record)
+            return record
+        if self._drop_dead_lease_unlocked(record, now):
+            return None
+        if record.status is not SessionStatus.ACTIVE and self._purgeable(record, now) and filtered:
+            # Job 3: purge a long-dead record, bounding the directory.
+            self._purge_unlocked(session_id)
+        return None
+
+    def _drop_dead_lease_unlocked(self, record: FileSessionRecord, now: float) -> bool:
+        """Job 2: clear an expired lease on a still-active record.
+
+        Returns whether it cleared one. Split out of
+        :meth:`_clean_one_unlocked` because it applies on two paths — the
+        ordinary job-2 branch, and a record that a ``--older-than`` /
+        ``--status`` / ``--site`` filter spared from job 1. A stale lease is
+        stale either way: it names a holder that is gone, and leaving it in
+        place makes the record read as in-use to the next caller and to
+        :func:`_lease_is_live`.
+        """
+        if (
+            record.status is SessionStatus.ACTIVE
+            and record.lease is not None
+            and record.lease.expires_at <= now
+        ):
+            record.lease = None
+            self._write_unlocked(record)
+            return True
+        return False
+
+    def _reapable(
+        self,
+        record: FileSessionRecord,
+        now: float,
+        *,
+        older_than_seconds: float | None,
+        status: SessionStatus | None,
+        site: str | None,
+    ) -> bool:
+        """Whether ``record`` satisfies every ``session clean`` filter that was passed.
+
+        AND composition: a filter that is ``None`` imposes no constraint, and
+        every filter that is not ``None`` must pass. Called once per record,
+        before deciding whether to reap it, from inside the same lock
+        :meth:`clean` already holds.
+        """
+        if status is not None and record.status is not status:
+            return False
+        if older_than_seconds is not None:
+            # Same age definition ``_purgeable`` uses: whichever of
+            # last-activity or expiry is more recent, so a session that was
+            # used right up until it expired is not called "old" the instant
+            # its clock runs out.
+            age = now - max(record.last_used_at, record.expires_at)
+            if age < older_than_seconds:
+                return False
+        if site is not None:
+            # ``hosts is None`` means "never tracked" (a pre-upgrade record
+            # or one this store has no navigation data for at all) -- it
+            # must never be treated as "confirmed not visited". Only a
+            # tracked set (``()`` or a populated tuple) that actually lacks
+            # ``site`` is a genuine non-match.
+            # Stored hosts are lower-cased by ``_hosts_from_urls``; the filter
+            # value comes straight off the command line, so `--site EXAMPLE.com`
+            # would otherwise never match a host recorded as `example.com`.
+            # Hostnames are case-insensitive, so compare them that way.
+            if record.hosts is None or site.lower() not in record.hosts:
+                return False
+        return True
 
     def acquire_lease(
         self,
@@ -591,6 +1131,17 @@ class FileSessionStore:
         grabs), enforced across *processes* rather than across threads. The
         refusal is an ordinary return value: two CLI invocations racing for
         one browser is normal traffic, not an error.
+
+        Acquiring a lease also **slides the record's expiry forward**, which
+        the in-memory reference store has no reason to do and this one does:
+        ``expires_at`` used to be written once at :meth:`create` and never
+        touched again, so a session whose TTL (300 seconds for a CLI
+        throwaway) was shorter than one slow page load sat *past* its expiry
+        while its browser was genuinely working — one sweep away from being
+        killed mid-operation (issue #14 task t6). Using a session is the
+        evidence that it is still wanted, so the record gets its full
+        original lifetime again from this moment. See :func:`_slid_expiry`
+        for why that lifetime needs no stored field.
         """
         with self._locked(session_id):
             record = self._require_unlocked(session_id)
@@ -609,6 +1160,9 @@ class FileSessionStore:
                     held_by=current.holder,
                     reason="lease_held",
                 )
+            # Order matters: the lifetime is read off the *pre-update*
+            # last_used_at, so slide the expiry before touching it.
+            record.expires_at = _slid_expiry(record, now)
             record.lease = Lease(holder=holder, acquired_at=now, expires_at=now + ttl_seconds)
             record.last_used_at = now
             self._write_unlocked(record)
@@ -683,6 +1237,24 @@ class FileSessionStore:
         except FileNotFoundError:
             return []
         return [entry.name[: -len(RECORD_SUFFIX)] for entry in entries if _is_record(entry)]
+
+    def _sweep_order(self) -> list[str]:
+        """:meth:`_session_ids`, rotated to a random start.
+
+        ``_session_ids`` is deliberately sorted — deterministic order is what
+        makes the rest of the store testable. But :meth:`clean`'s time budget
+        stops mid-pass, so a *sorted* order means every budgeted sweep chews
+        the same lexicographic head and records near the tail are never
+        reached: with a budget that only ever covers the first N, the last
+        record starves indefinitely. Rotating the start spreads the work over
+        successive sweeps, so every record is eventually visited without the
+        pass itself becoming unordered.
+        """
+        ids = self._session_ids()
+        if len(ids) < 2:
+            return ids
+        offset = secrets.randbelow(len(ids))
+        return ids[offset:] + ids[:offset]
 
     def _ensure_directory(self) -> None:
         self.directory.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
@@ -789,8 +1361,22 @@ class FileSessionStore:
         record.diagnostics = record.diagnostics + tuple(launched.diagnostics)
 
     def _reap_browser(self, record: FileSessionRecord) -> None:
-        """Stop this session's browser and drop everything that names it."""
-        if record.pid is not None:
+        """Stop this session's browser and drop everything that names it.
+
+        Only a pid this store recorded is ever signalled, and only while it
+        still plausibly *is* our browser: a ``"foreign"`` probe (see
+        :func:`_pid_liveness`) means something answers at that pid but
+        belongs to another user, which on a long-lived host is pid reuse
+        after our browser already exited — not our browser under another
+        uid. Signalling it would be WebGlass reaching outside its own
+        processes, the exact failure issue #14 first appeared to be (the 187
+        "leaked" chromium processes were the reporter's desktop browser).
+        The reap continues for everything this store *does* own — the
+        endpoint and the profile directory still go — and the record reports
+        ``browser_reaped=False`` / ``browser_was_running=None``, its existing
+        spelling of "no attempt was made".
+        """
+        if record.pid is not None and _pid_liveness(record.pid) != "foreign":
             record.browser_was_running = bool(self.terminator(record.pid))
             record.browser_reaped = True
         # The endpoint names a browser that is gone: keeping it would be a
@@ -808,7 +1394,13 @@ class FileSessionStore:
 
 
 def _to_payload(record: FileSessionRecord) -> dict[str, Any]:
+    # Additive (build plan t8): the key is *omitted entirely* when the host
+    # set is unknown, so a payload written for an untracked record is
+    # byte-identical to a pre-t8 one — and the read side's "key absent means
+    # unknown" rule is the same rule in both directions.
+    hosts = {} if record.hosts is None else {"hosts": list(record.hosts)}
     return {
+        **hosts,
         "schema_version": RECORD_SCHEMA_VERSION,
         "session_id": record.session_id,
         "generation": record.generation,
@@ -838,7 +1430,28 @@ def _to_payload(record: FileSessionRecord) -> dict[str, Any]:
         "diagnostics": list(record.diagnostics),
         "browser_reaped": record.browser_reaped,
         "browser_was_running": record.browser_was_running,
+        # Additive (build plan t7): a pre-t7 payload has no such key, and
+        # `.get(..., "")` on the read side is what makes that record load
+        # under the same RECORD_SCHEMA_VERSION rather than forcing a bump.
+        "owner_token": record.owner_token,
     }
+
+
+def _hosts_from_payload(payload: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Read the stored host set: absent means unknown, wrong shape means malformed.
+
+    Raises :class:`TypeError` for anything that is neither absent/``null``
+    nor a list — :func:`_from_payload`'s ``except`` clause turns that into a
+    :class:`SessionRecordError`. A dict or a bare string would otherwise
+    iterate into a plausible-looking set of nonsense hosts, which is the
+    fail-open behavior a malformed record must never get.
+    """
+    if "hosts" not in payload or payload["hosts"] is None:
+        return None
+    raw = payload["hosts"]
+    if not isinstance(raw, list):
+        raise TypeError(f"'hosts' must be a list, got {type(raw).__name__}")
+    return tuple(str(item) for item in raw)
 
 
 def _from_payload(payload: Any, path: Path) -> FileSessionRecord:
@@ -885,6 +1498,20 @@ def _from_payload(payload: Any, path: Path) -> FileSessionRecord:
                 if payload.get("browser_was_running") is None
                 else bool(payload["browser_was_running"])
             ),
+            # Additive default (build plan t7): a record written before this
+            # field existed has no ``owner_token`` key at all, and ``""`` is
+            # the "claimed by nobody" value — never a wildcard, never equal
+            # to a real owner's token — so a pre-upgrade record is never
+            # matched by any owner's reuse query (acceptance criterion 2).
+            owner_token=str(payload.get("owner_token", "")),
+            # Additive default (build plan t8). An absent key means the
+            # record predates host tracking: that is *unknown*, kept as
+            # ``None``, and deliberately not collapsed to ``()`` — ``session
+            # clean --site`` (t9) must not reap a record on the grounds that
+            # it demonstrably never visited a site it has no data about. A
+            # present-but-wrong shape is malformed, not empty, and raises
+            # below rather than failing open.
+            hosts=_hosts_from_payload(payload),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SessionRecordError(f"session record {path} is malformed: {exc}") from exc
