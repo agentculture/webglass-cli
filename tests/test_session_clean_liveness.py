@@ -103,7 +103,8 @@ def test_clean_skips_a_record_whose_lease_is_held_and_unexpired(tmp_path: Path) 
         record = store.get("sess-1")
         assert record is not None
         assert record.status is SessionStatus.ACTIVE
-        assert record.lease is not None and record.lease.holder == HOLDER
+        assert record.lease is not None
+        assert record.lease.holder == HOLDER
         assert record.browser_reaped is False
         assert sleeper.poll() is None, "the sweep killed a browser that was in use"
         assert (tmp_path / "sessions" / "profiles" / "sess-1").is_dir()

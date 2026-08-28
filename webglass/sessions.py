@@ -363,27 +363,46 @@ class InMemorySessionStore:
         with self._lock:
             reaped: list[SessionRecord] = []
             for record in self._records.values():
-                if record.status is not SessionStatus.ACTIVE or record.expires_at > now:
-                    continue
-                if status is not None and record.status is not status:
-                    continue
-                if older_than_seconds is not None and (now - record.expires_at) < (
-                    older_than_seconds
+                if not self._is_reapable(
+                    record, now, older_than_seconds=older_than_seconds, status=status, site=site
                 ):
                     continue
-                if site is not None:
-                    # The base SessionRecord carries no navigation history at
-                    # all (that is FileSessionRecord's t8 addition), so an
-                    # in-memory record can never be known to have visited
-                    # anywhere -- same "unknown is not a match" rule as the
-                    # file store's ``hosts is None`` case.
-                    hosts = getattr(record, "hosts", None)
-                    if hosts is None or site not in hosts:
-                        continue
                 record.status = SessionStatus.EXPIRED
                 record.lease = None
                 reaped.append(record)
             return reaped
+
+    @staticmethod
+    def _is_reapable(
+        record: SessionRecord,
+        now: float,
+        *,
+        older_than_seconds: float | None,
+        status: SessionStatus | None,
+        site: str | None,
+    ) -> bool:
+        """Whether ``clean`` should expire this record, filters included.
+
+        Split out of :meth:`clean` so the loop states the action and this
+        states the predicate. Mirrors ``FileSessionStore._reapable``'s
+        semantics for the fields an in-memory record actually has.
+        """
+        if record.status is not SessionStatus.ACTIVE or record.expires_at > now:
+            return False
+        if status is not None and record.status is not status:
+            return False
+        if older_than_seconds is not None and (now - record.expires_at) < older_than_seconds:
+            return False
+        if site is not None:
+            # The base SessionRecord carries no navigation history at all
+            # (that is FileSessionRecord's t8 addition), so an in-memory
+            # record can never be known to have visited anywhere -- same
+            # "unknown is not a match" rule as the file store's
+            # ``hosts is None`` case.
+            hosts = getattr(record, "hosts", None)
+            if hosts is None or site not in hosts:
+                return False
+        return True
 
     def acquire_lease(
         self,

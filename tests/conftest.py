@@ -101,7 +101,7 @@ def fixture_site() -> Iterator[str]:
         site.stop()
 
 
-@pytest.fixture()
+@pytest.fixture
 def session_store() -> FileSessionStore:
     """A :class:`FileSessionStore` rooted at this test's isolated state dir.
 
@@ -117,7 +117,7 @@ def session_store() -> FileSessionStore:
     return FileSessionStore(default_sessions_dir())
 
 
-@pytest.fixture()
+@pytest.fixture
 def seed_session_records(session_store: FileSessionStore) -> SeedSessionRecords:
     """A callable that seeds ``session_store`` with records of a chosen shape.
 

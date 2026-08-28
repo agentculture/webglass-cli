@@ -978,40 +978,73 @@ class FileSessionStore:
             if deadline is not None and time.monotonic() >= deadline:
                 break
             with self._locked(session_id):
-                try:
-                    record = self._read_unlocked(session_id)
-                except SessionRecordError:
-                    self._purge_unlocked(session_id)
-                    continue
-                if record is None:
-                    continue
-                if _lease_is_live(record, now):
-                    # In use. Not expired-but-idle, not orphaned: in use.
-                    continue
-                filtered = self._reapable(
-                    record, now, older_than_seconds=older_than_seconds, status=status, site=site
+                expired = self._clean_one_unlocked(
+                    session_id,
+                    now,
+                    older_than_seconds=older_than_seconds,
+                    status=status,
+                    site=site,
                 )
-                if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
-                    if filtered:
-                        record.status = SessionStatus.EXPIRED
-                        record.lease = None
-                        self._reap_browser(record)
-                        self._write_unlocked(record)
-                        reaped.append(record)
-                elif (
-                    record.status is SessionStatus.ACTIVE
-                    and record.lease is not None
-                    and record.lease.expires_at <= now
-                ):
-                    record.lease = None
-                    self._write_unlocked(record)
-                elif (
-                    record.status is not SessionStatus.ACTIVE
-                    and self._purgeable(record, now)
-                    and filtered
-                ):
-                    self._purge_unlocked(session_id)
+            if expired is not None:
+                reaped.append(expired)
         return reaped
+
+    def _clean_one_unlocked(
+        self,
+        session_id: str,
+        now: float,
+        *,
+        older_than_seconds: float | None,
+        status: SessionStatus | None,
+        site: str | None,
+    ) -> FileSessionRecord | None:
+        """Run :meth:`clean`'s four jobs against one already-locked record.
+
+        Extracted from :meth:`clean` so the loop reads as "for each record,
+        under its lock, do the work" and the per-record decision tree lives in
+        one place. Returns the record only for job 1 (an active session
+        expired and reaped), which is exactly what ``clean`` reports; the
+        other three jobs are side effects with nothing to report.
+
+        The caller holds the lock — every path here is ``_unlocked``.
+        """
+        try:
+            record = self._read_unlocked(session_id)
+        except SessionRecordError:
+            # Job 4: an unreadable record file. Purging is the only recovery.
+            self._purge_unlocked(session_id)
+            return None
+        if record is None:
+            return None
+        if _lease_is_live(record, now):
+            # In use. Not expired-but-idle, not orphaned: in use.
+            return None
+
+        filtered = self._reapable(
+            record, now, older_than_seconds=older_than_seconds, status=status, site=site
+        )
+        if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
+            if not filtered:
+                return None
+            # Job 1: expire it, stop its browser, report it.
+            record.status = SessionStatus.EXPIRED
+            record.lease = None
+            self._reap_browser(record)
+            self._write_unlocked(record)
+            return record
+        if (
+            record.status is SessionStatus.ACTIVE
+            and record.lease is not None
+            and record.lease.expires_at <= now
+        ):
+            # Job 2: drop a lease whose holder is gone.
+            record.lease = None
+            self._write_unlocked(record)
+            return None
+        if record.status is not SessionStatus.ACTIVE and self._purgeable(record, now) and filtered:
+            # Job 3: purge a long-dead record, bounding the directory.
+            self._purge_unlocked(session_id)
+        return None
 
     def _reapable(
         self,

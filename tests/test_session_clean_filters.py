@@ -281,7 +281,9 @@ def test_older_than_malformed_duration_json_mode(capsys: pytest.CaptureFixture[s
 
     assert rc == 1
     payload = json.loads(capsys.readouterr().err)
-    assert "code" in payload and "message" in payload and "remediation" in payload
+    assert "code" in payload
+    assert "message" in payload
+    assert "remediation" in payload
 
 
 def test_older_than_accepts_bare_seconds_and_suffixed_durations(

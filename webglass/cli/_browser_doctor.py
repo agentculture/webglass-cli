@@ -461,7 +461,7 @@ def check_session_store_health(sessions_dir: Path | None = None) -> Check:
         severity="warning" if over_threshold else "info",
         message="; ".join(message_parts),
         remediation=(
-            "run `webglass session clean` to sweep stale/expired sessions and reclaim " "disk space"
+            "run `webglass session clean` to sweep stale/expired sessions and reclaim disk space"
             if (over_threshold or stale_count or corrupt)
             else ""
         ),
