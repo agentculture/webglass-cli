@@ -133,18 +133,19 @@ def test_seed_records_round_trips_through_the_store(session_store: FileSessionSt
     assert read_back.status is SessionStatus.CLOSED
 
 
-def test_seed_records_forward_compatible_kwargs_are_inert_today(
+def test_seed_records_forward_compatible_kwargs_now_land_for_real(
     session_store: FileSessionStore,
 ) -> None:
-    """``hosts`` is still accepted-but-inert, ahead of build plan t8.
+    """Neither ``owner_token`` nor ``hosts`` is forward-compatible-only any more.
 
-    ``owner_token`` is no longer forward-compatible-only: build plan t7 has
-    landed the field on :class:`FileSessionRecord`, so ``_set_if_declared``
-    now sets it for real (see ``tests/test_owner_token.py``, which is where
-    that behavior is characterized in full). ``hosts`` has no field yet
-    (that is t8's job), so passing it here must still not raise and must
-    still not silently invent a payload key that ``_to_payload`` does not
-    know about.
+    Both fields have landed on :class:`FileSessionRecord` -- ``owner_token``
+    with build plan t7, ``hosts`` with t8 -- so ``_set_if_declared`` now sets
+    each of them for real and ``_to_payload`` carries them to disk. The full
+    behavior of each lives with its own feature (``tests/test_owner_token.py``
+    and ``tests/test_navigated_hosts.py``); what this test pins is the
+    harness's half of the contract: the same call that was silently inert
+    before the field existed started landing the value the moment it did,
+    with no rewrite at the call site.
     """
     (record,) = seed_records(
         session_store,
@@ -156,15 +157,26 @@ def test_seed_records_forward_compatible_kwargs_are_inert_today(
     read_back = session_store.get(record.session_id)
     assert read_back is not None
     assert read_back.owner_token == "tok-123"
-    assert not hasattr(read_back, "hosts")
+    assert read_back.hosts == ("example.com", "example.org")
 
 
 def test_seed_records_omitted_forward_compatible_kwargs_stay_omitted(
     session_store: FileSessionStore,
 ) -> None:
+    """Omitting them writes the record shape a record would have anyway.
+
+    For ``hosts`` that means ``None`` -- *unknown*, the pre-upgrade reading --
+    rather than ``()``: a seeded record is written straight to disk, not
+    created through :meth:`FileSessionStore.create`, so nothing has been
+    tracking it and it must not claim otherwise. A test that wants a
+    known-empty set passes ``hosts=()`` explicitly.
+    """
     (record,) = seed_records(session_store, count=1, status=SessionStatus.CLOSED)
     assert record.owner_token == ""
-    assert not hasattr(record, "hosts")
+    assert record.hosts is None
+    read_back = session_store.get(record.session_id)
+    assert read_back is not None
+    assert read_back.hosts is None
 
 
 # --- count_by_status / count_active_with_dead_pids -----------------------

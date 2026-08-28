@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -1208,6 +1209,49 @@ class WebGlassService:
         ephemeral = bool(run.operation.session_ephemeral)
         return session_id, {"session_id": session_id, "ephemeral": ephemeral}
 
+    def _record_navigated_hosts(
+        self, session_id: str, requested_url: str, hops: Sequence[NavigationHop]
+    ) -> None:
+        """Note on the session record which *document* hosts this navigation reached.
+
+        This is the whole of build plan t8's write path, and where it sits is
+        the design:
+
+        * **Here, not in the Playwright adapter.** Every browser backend
+          reaches this line, so the record does not depend on which adapter
+          answered — and this is the layer that already re-checks the chain
+          (:meth:`_check_navigation`), so "the hosts we navigated to" is
+          derived from the same list policy is evaluated against, never a
+          second, divergent one.
+        * **Navigation commit only, never a request hook.** A ``page.on(
+          "request")`` listener in the adapter would see every subresource —
+          CDNs, fonts, analytics, third-party frames — turning a handful of
+          entries into a heavy browsing log nobody asked for. ``browser.open``
+          *is* the top-level navigation, so hooking it is what makes ``clean
+          --site`` mean what it reads.
+        * **Before the policy re-check, not after.** By the time this runs the
+          browser has already been to these hosts; a hop that
+          :meth:`_check_navigation` is about to refuse was still *contacted*
+          (see CLAUDE.md's known deviation d1), and a session that touched a
+          host should be findable by ``--site`` whether or not the caller was
+          allowed to see what came back.
+
+        The store method is optional (it is a ``FileSessionStore`` field, not
+        part of the ``SessionStore`` protocol) and an unstored ephemeral
+        session resolves to no record, so both degrade to recording nothing —
+        never to a failed navigation. A store that raises while recording
+        A filesystem failure while writing the record must not fail a
+        navigation that already succeeded either — the caller's answer is the
+        page, and the host set is a best-effort mapping — so ``OSError`` is
+        suppressed. Only that: anything else escaping the store is a bug, and
+        a bug that silently eats itself here would be invisible.
+        """
+        recorder = getattr(self.sessions, "record_navigated_urls", None)
+        if recorder is None:
+            return
+        with suppress(OSError):
+            recorder(session_id, _chain_urls(requested_url, hops))
+
     # -- reference helpers --------------------------------------------------
 
     def _entry(self, snapshot_id: str) -> SnapshotEntry:
@@ -1409,6 +1453,7 @@ class WebGlassService:
         opened = browser.open(session_id, url)
         elapsed = max(0.0, self.clock.now() - started)
         run.navigation.extend(opened.redirect_chain)
+        self._record_navigated_hosts(session_id, url, opened.redirect_chain)
         run.effect("network-request")
         run.effect("navigation-occurred")
         run.effect("browser-state-may-change")

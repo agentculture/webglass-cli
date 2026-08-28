@@ -123,8 +123,9 @@ def seed_session_records(session_store: FileSessionStore) -> SeedSessionRecords:
 
     Thin binding over :func:`tests.helpers.session_seed.seed_records` --
     see that module for the full contract (status/expiry/owner/host-set
-    selection, the forward-compatible ``owner_token``/``hosts`` seams for
-    build plan tasks t7/t8, and why records are written directly rather than
+    selection, the ``owner_token``/``hosts`` fields from build plan tasks
+    t7/t8 -- including why an unpassed ``hosts`` seeds an *unknown* rather
+    than an empty set -- and why records are written directly rather than
     through :meth:`~webglass.adapters.session_store.FileSessionStore.create`).
     A test calls this fixture once per distinct record shape it needs, e.g.
     once for a batch of ``closed`` records and again for a batch of

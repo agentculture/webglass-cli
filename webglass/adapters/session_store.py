@@ -104,14 +104,16 @@ import shutil
 import signal
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from webglass.sessions import (
     DEFAULT_LEASE_TTL_SECONDS,
+    REPR_REDACTED,
     Lease,
     LeaseGrant,
     LeaseRefusal,
@@ -122,6 +124,8 @@ from webglass.sessions import (
 __all__ = [
     "ALLOW_UNSANDBOXED_ENV",
     "DEFAULT_RECORD_RETENTION_SECONDS",
+    "MAX_NAVIGATED_HOSTS",
+    "NAVIGATED_HOSTS_TRUNCATED",
     "PROFILES_DIRNAME",
     "RECORD_SCHEMA_VERSION",
     "SESSIONS_DIRNAME",
@@ -168,6 +172,24 @@ _FILE_MODE = 0o600
 #: The 3-day window is kept so repeated visits can be found and mapped for
 #: reuse, not as a forensics window.
 DEFAULT_RECORD_RETENTION_SECONDS = 3 * 24 * 60 * 60.0
+
+#: Hard cap on :attr:`FileSessionRecord.hosts`. A session that navigates to
+#: more than this many *distinct* hosts keeps the first ones it saw and drops
+#: the rest — the record is a bounded mapping for ``clean --site`` and reuse
+#: matching, not a browsing log, and an unbounded per-session list would grow
+#: without limit under a long-lived session or a redirect loop. 32 is well
+#: past what an ordinary research session touches at the *document* level
+#: (subresource hosts are never recorded at all), so hitting it is a signal
+#: in itself.
+MAX_NAVIGATED_HOSTS = 32
+
+#: Appended once to :attr:`FileSessionRecord.diagnostics` when the host set
+#: hits :data:`MAX_NAVIGATED_HOSTS` and a genuinely new host had to be
+#: dropped. Dropping silently would let a bounded prefix read as a complete
+#: history; declaring the omission is the invariant ("every omission is
+#: declared", CLAUDE.md section 11) and it tells ``--site`` consumers that an
+#: absent host is no longer proof of absence for this record.
+NAVIGATED_HOSTS_TRUNCATED = "navigated-hosts-truncated"
 
 #: Session ids become filenames, so they are validated rather than trusted:
 #: ``../`` or an absolute path in a caller-supplied ``--session-id`` must never
@@ -346,6 +368,55 @@ def _slid_expiry(record: FileSessionRecord, now: float) -> float:
     return max(record.expires_at, now + lifetime, lease_floor)
 
 
+def _hosts_from_urls(urls: Iterable[str]) -> list[str]:
+    """The hostnames of ``urls``, lower-cased, deduplicated, in first-seen order.
+
+    ``urlsplit(...).hostname`` is doing the privacy work here, not a regex:
+    it lower-cases the host, strips the port, and — the part that matters —
+    strips any ``user:password@`` userinfo, so a credential embedded in a URL
+    cannot reach the record even by accident. Everything else about the URL
+    (path, query, fragment) is discarded, because the record is a host-level
+    mapping and never a browsing log.
+
+    A URL with no host at all (``about:blank``, a ``data:`` URL, the empty
+    string) contributes nothing rather than an empty-string entry.
+    """
+    hosts: list[str] = []
+    for url in urls:
+        try:
+            hostname = urlsplit(url).hostname
+        except ValueError:
+            # A URL the stdlib parser rejects (e.g. a malformed IPv6 literal)
+            # is not a host we can record; it is also not an error worth
+            # failing a navigation over.
+            continue
+        if not hostname:
+            continue
+        host = hostname.lower()
+        if host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _merge_hosts(existing: tuple[str, ...], new: Iterable[str]) -> tuple[tuple[str, ...], bool]:
+    """Add ``new`` hosts to ``existing``, capped. Returns the set and whether it overflowed.
+
+    "Overflowed" means a host that was *not* already present had to be
+    dropped — re-visiting a host already in a full set is not an omission and
+    does not raise the flag.
+    """
+    merged = list(existing)
+    truncated = False
+    for host in new:
+        if host in merged:
+            continue
+        if len(merged) >= MAX_NAVIGATED_HOSTS:
+            truncated = True
+            continue
+        merged.append(host)
+    return tuple(merged), truncated
+
+
 def _reap_child(pid: int) -> None:
     """Collect ``pid`` if it happens to be *this* process's child.
 
@@ -481,6 +552,50 @@ class FileSessionRecord(SessionRecord):
         endpoint_ref`, it grants no control over the browser by itself), so it
         is rendered in both ``repr()`` and :meth:`to_public_dict`.
 
+    ``hosts``
+        The **top-level document hosts this session actually navigated to**,
+        first-seen order, deduplicated, capped at :data:`MAX_NAVIGATED_HOSTS`
+        (build plan t8, issue #14). Two consumers need it: ``session clean
+        --site`` (t9) filters on it, and reuse repetition-mapping (t13)
+        matches on it.
+
+        Three properties make it safe to keep at all:
+
+        * **Navigation only, never subresources.** Recording every host the
+          browser touched would sweep in CDNs, fonts, analytics, and
+          third-party frames — noisy, and a far heavier privacy surface. The
+          only writer is the navigation-commit seam in
+          ``WebGlassService._open``; there is no request hook anywhere, and
+          ``tests/test_navigated_hosts.py`` asserts the call-site count
+          structurally so a later one cannot appear quietly.
+        * **Host-level facts only.** Never a path, query, fragment, port,
+          page content, cookie, or credential — :func:`_hosts_from_urls`
+          keeps only ``urlsplit(...).hostname``, which also strips any
+          ``user:password@`` userinfo before it can reach disk. This is
+          proto-Web-memory (issue #1 section 2): it answers "have we seen
+          this?" and is never a credential store.
+        * **Unknown is not empty.** ``None`` — the default, and what a record
+          written before this field existed loads as — means *no host data
+          was ever tracked for this session*. ``()`` means *tracked, and it
+          went nowhere*. ``--site`` may reap on the second and must never
+          reap on the first, so the two states stay distinguishable all the
+          way to disk. An untracked record also stays untracked:
+          :meth:`FileSessionStore.record_navigated_urls` refuses to merge
+          into ``None``, because a set built from post-upgrade navigations
+          alone would look complete while omitting everywhere that session
+          had already been.
+
+        Kept out of ``repr()`` (``metadata={REPR_REDACTED: True}``) but
+        present in :meth:`to_public_dict` — a deliberate, *different* call
+        from :attr:`owner_token`, which is in both. ``repr()`` surfaces in
+        tracebacks, debuggers, assertion messages, and any log line that
+        formats a record, none of which is scoped to the session's owner, and
+        browsing history should not leak there. ``to_public_dict`` *is*
+        caller-scoped (``session list`` returns only the caller's own
+        sessions) and is the one rendering that makes retained data
+        inspectable — and data a caller cannot see is data they cannot
+        knowingly forget, which is the persistence rule this field inherits.
+
     ``repr=False`` is load-bearing, not style: ``@dataclass`` generates a
     ``__repr__`` by default, and a generated one would print *every* field —
     silently replacing the base class's redacting ``repr()`` and putting the
@@ -495,6 +610,7 @@ class FileSessionRecord(SessionRecord):
     browser_reaped: bool = False
     browser_was_running: bool | None = None
     owner_token: str = ""
+    hosts: tuple[str, ...] | None = field(default=None, metadata={REPR_REDACTED: True})
 
     def to_public_dict(self) -> dict[str, Any]:
         """The base record's safe dict, plus the process facts — never the endpoint.
@@ -527,6 +643,10 @@ class FileSessionRecord(SessionRecord):
                 "browser_was_running": self.browser_was_running,
                 "observed_liveness": self._observed_liveness(),
                 "owner_token": self.owner_token,
+                # ``None`` (never tracked) survives as JSON ``null``, and is
+                # not flattened to ``[]``: the two mean different things and
+                # a caller filtering on hosts must be able to tell them apart.
+                "hosts": None if self.hosts is None else list(self.hosts),
             }
         )
         return payload
@@ -646,6 +766,10 @@ class FileSessionStore:
                 endpoint_ref=endpoint_ref,
                 diagnostics=notes,
                 owner_token=owner_token,
+                # Tracked from birth, and *known* empty: this store watched
+                # the session from its first instant, so "no hosts yet" is a
+                # fact about it, not an absence of data (build plan t8).
+                hosts=(),
             )
             if not endpoint_ref and self.launcher is not None:
                 self._launch(record)
@@ -723,6 +847,58 @@ class FileSessionStore:
             record.status = SessionStatus.CLOSED
             record.lease = None
             self._write_unlocked(record)
+
+    def record_navigated_urls(
+        self, session_id: str, urls: Iterable[str]
+    ) -> FileSessionRecord | None:
+        """Fold the hosts of ``urls`` into this session's :attr:`~FileSessionRecord.hosts`.
+
+        Called from exactly one place — the navigation-commit seam in
+        ``WebGlassService._open``, once per navigation, with the requested URL
+        plus every hop the backend actually navigated. Callers hand over
+        *URLs*, not hosts, on purpose: reducing a URL to its host is the
+        privacy boundary of this field, and it is enforced here, at the
+        storage edge, rather than trusted to each caller (see
+        :func:`_hosts_from_urls`).
+
+        Returns the updated record, or ``None`` when there was nothing to
+        update. Every "nothing to update" case is a silent no-op rather than
+        an error, because none of them is a reason to fail the navigation
+        that triggered it:
+
+        * no URL carried a host (``about:blank`` and friends);
+        * the session id names no record — an *unstored* ephemeral session
+          (the anonymous default) reaches here and must never cause a record
+          file to spring into existence;
+        * the record file is unreadable — :meth:`clean` is the one path that
+          repairs corruption, not this one;
+        * the record's host set is ``None`` — an untracked, pre-upgrade
+          record stays honestly untracked rather than acquiring a set that
+          looks complete but only covers navigations since the upgrade.
+
+        Not part of the :class:`~webglass.sessions.SessionStore` protocol: the
+        service calls it only if the injected store offers it, so a store that
+        does not track hosts (``InMemorySessionStore``) still navigates fine.
+        """
+        hosts = _hosts_from_urls(urls)
+        if not hosts or not _valid_session_id(session_id):
+            return None
+        with self._locked(session_id):
+            try:
+                record = self._read_unlocked(session_id)
+            except SessionRecordError:
+                return None
+            if record is None or record.hosts is None:
+                return None
+            merged, truncated = _merge_hosts(record.hosts, hosts)
+            newly_truncated = truncated and NAVIGATED_HOSTS_TRUNCATED not in record.diagnostics
+            if merged == record.hosts and not newly_truncated:
+                return record
+            record.hosts = merged
+            if newly_truncated:
+                record.diagnostics = record.diagnostics + (NAVIGATED_HOSTS_TRUNCATED,)
+            self._write_unlocked(record)
+            return record
 
     def clean(self, now: float) -> list[FileSessionRecord]:
         """Reap expired sessions, their browsers, and their leftovers.
@@ -1047,7 +1223,13 @@ class FileSessionStore:
 
 
 def _to_payload(record: FileSessionRecord) -> dict[str, Any]:
+    # Additive (build plan t8): the key is *omitted entirely* when the host
+    # set is unknown, so a payload written for an untracked record is
+    # byte-identical to a pre-t8 one — and the read side's "key absent means
+    # unknown" rule is the same rule in both directions.
+    hosts = {} if record.hosts is None else {"hosts": list(record.hosts)}
     return {
+        **hosts,
         "schema_version": RECORD_SCHEMA_VERSION,
         "session_id": record.session_id,
         "generation": record.generation,
@@ -1082,6 +1264,23 @@ def _to_payload(record: FileSessionRecord) -> dict[str, Any]:
         # under the same RECORD_SCHEMA_VERSION rather than forcing a bump.
         "owner_token": record.owner_token,
     }
+
+
+def _hosts_from_payload(payload: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Read the stored host set: absent means unknown, wrong shape means malformed.
+
+    Raises :class:`TypeError` for anything that is neither absent/``null``
+    nor a list — :func:`_from_payload`'s ``except`` clause turns that into a
+    :class:`SessionRecordError`. A dict or a bare string would otherwise
+    iterate into a plausible-looking set of nonsense hosts, which is the
+    fail-open behavior a malformed record must never get.
+    """
+    if "hosts" not in payload or payload["hosts"] is None:
+        return None
+    raw = payload["hosts"]
+    if not isinstance(raw, list):
+        raise TypeError(f"'hosts' must be a list, got {type(raw).__name__}")
+    return tuple(str(item) for item in raw)
 
 
 def _from_payload(payload: Any, path: Path) -> FileSessionRecord:
@@ -1134,6 +1333,14 @@ def _from_payload(payload: Any, path: Path) -> FileSessionRecord:
             # to a real owner's token — so a pre-upgrade record is never
             # matched by any owner's reuse query (acceptance criterion 2).
             owner_token=str(payload.get("owner_token", "")),
+            # Additive default (build plan t8). An absent key means the
+            # record predates host tracking: that is *unknown*, kept as
+            # ``None``, and deliberately not collapsed to ``()`` — ``session
+            # clean --site`` (t9) must not reap a record on the grounds that
+            # it demonstrably never visited a site it has no data about. A
+            # present-but-wrong shape is malformed, not empty, and raises
+            # below rather than failing open.
+            hosts=_hosts_from_payload(payload),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SessionRecordError(f"session record {path} is malformed: {exc}") from exc

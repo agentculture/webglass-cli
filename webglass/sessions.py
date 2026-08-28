@@ -56,6 +56,29 @@ DEFAULT_LEASE_TTL_SECONDS = 30.0
 
 _REDACTED = "<redacted>"
 
+#: Dataclass field-metadata key that keeps a field's *value* out of
+#: :meth:`SessionRecord.__repr__`, which renders ``<name>=<redacted>``
+#: instead. :attr:`SessionRecord.endpoint_ref` is redacted unconditionally
+#: because it is secret-equivalent; a subclass field opts in through this
+#: key when its value is sensitive for some other reason
+#: (``FileSessionRecord.hosts`` is browsing history — build plan t8).
+#:
+#: It exists because the base ``__repr__`` enumerates
+#: ``dataclasses.fields(self)`` on the *instance*, so a subclass field is
+#: printed by the inherited redacting repr with no way to opt out short of
+#: overriding that repr — and overriding it is precisely the mistake
+#: ``FileSessionRecord``'s ``repr=False`` exists to prevent.
+REPR_REDACTED = "webglass.repr_redacted"
+
+
+def _repr_redacted(field: dataclasses.Field[Any]) -> bool:
+    """Whether ``field``'s value must not appear in a ``repr()``.
+
+    ``endpoint_ref`` is named explicitly rather than carrying the metadata
+    itself so the redaction survives a subclass redeclaring the field.
+    """
+    return field.name == "endpoint_ref" or bool(field.metadata.get(REPR_REDACTED))
+
 
 class SessionStatus(str, Enum):
     """Lifecycle status of a :class:`SessionRecord`."""
@@ -131,12 +154,22 @@ class SessionRecord:
     endpoint_ref: str = ""
 
     def __repr__(self) -> str:  # pragma: no cover - trivial formatting
-        rendered = ", ".join(
+        """Every field, except that redacted ones render as ``<redacted>``.
+
+        ``endpoint_ref`` is always redacted; any other field (including one
+        declared by a subclass) opts in with ``metadata={REPR_REDACTED: True}``.
+        The redacted names are still *shown* — a repr that dropped them would
+        hide the fact that the record carries them at all.
+        """
+        shown = ", ".join(
             f"{f.name}={getattr(self, f.name)!r}"
             for f in dataclasses.fields(self)
-            if f.name != "endpoint_ref"
+            if not _repr_redacted(f)
         )
-        return f"{type(self).__name__}({rendered}, endpoint_ref={_REDACTED})"
+        hidden = ", ".join(
+            f"{f.name}={_REDACTED}" for f in dataclasses.fields(self) if _repr_redacted(f)
+        )
+        return f"{type(self).__name__}({shown}, {hidden})"
 
     def to_public_dict(self) -> dict[str, Any]:
         """A dict safe for JSON output, logs, or evidence: no ``endpoint_ref``.
