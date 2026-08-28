@@ -1005,7 +1005,11 @@ def test_failed_navigation_in_ephemeral_session_closes_and_reaps_browser(
         session_id: str | None = None
         profile_dir: Path | None = None
         try:
-            with _factory.ephemeral_session(service, None) as session_id:
+            # t2 changed this yield from a bare id to a ProvisionedSession
+            # carrying the id plus whether the session is invocation-scoped.
+            with _factory.ephemeral_session(service, None) as provisioned:
+                assert provisioned.ephemeral is True
+                session_id = provisioned.session_id
                 assert session_id is not None
                 record = store.get(session_id)
                 assert record is not None
