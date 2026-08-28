@@ -55,6 +55,16 @@ runtime dependency since M2 — the 2026-08-07 user decision, spec claim c8,
 overriding issue #1 section 12's declared-extra recommendation), an explicit
 policy-profile mechanism for authorizing a declared app under test, and
 file-backed sessions that survive between separate one-shot CLI invocations.
+Since 0.8.0 (issue #14) the session plane also **maintains itself**: a
+session-creating invocation runs a time-bounded opportunistic sweep (never a
+read verb — a read must not mutate the store a caller is observing), records
+carry the top-level navigation hosts they visited and an owner token,
+`session clean` takes `--older-than` / `--status` / `--site`, retention is
+3 days, `doctor` has a `session_store_health` check, and flow-scoped session
+reuse is available opt-in via `$WEBGLASS_SESSION_OWNER` (off by default;
+`--fresh-session` opts out per call). Sessions are still never shared across
+tasks — reuse is scoped to one flow's own recent session and bumps the
+generation, so stale element references keep failing safely.
 `search` needs `$WEBGLASS_BRAVE_API_KEY`; without one it reports a structured
 `backend_unavailable` result rather than pretending to work. What is **not**
 built yet: the durable evidence store, the exploration graph, Web-memory, the
