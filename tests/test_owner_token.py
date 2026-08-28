@@ -95,7 +95,7 @@ def test_owner_token_round_trips_through_the_on_disk_payload(tmp_path: Path) -> 
     assert payload["owner_token"] == "token-xyz"
 
 
-def test_owner_token_is_visible_in_to_public_dict(tmp_path: Path) -> None:
+def test_owner_token_itself_is_never_rendered(tmp_path: Path) -> None:
     """Not a secret like ``endpoint_ref`` -- it is a deliberate, disclosed field."""
     store = FileSessionStore(tmp_path / "sessions")
     record = store.create(
@@ -108,7 +108,13 @@ def test_owner_token_is_visible_in_to_public_dict(tmp_path: Path) -> None:
         expires_at=1_700_000_300.0,
         owner_token="token-abc",
     )
-    assert record.to_public_dict()["owner_token"] == "token-abc"
+    rendered = record.to_public_dict()
+    # The token gates reuse eligibility and this rendering is not owner-scoped
+    # (swept_sessions carries other owners' records), so the value never
+    # appears -- only whether one is set. PR #15 review finding 6.
+    assert "owner_token" not in rendered
+    assert rendered["owner_token_set"] is True
+    assert "token-abc" not in str(rendered)
 
 
 # ---------------------------------------------------------------------------

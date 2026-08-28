@@ -647,7 +647,15 @@ class FileSessionRecord(SessionRecord):
                 "browser_reaped": self.browser_reaped,
                 "browser_was_running": self.browser_was_running,
                 "observed_liveness": self._observed_liveness(),
-                "owner_token": self.owner_token,
+                # NOT the owner token. It is not a secret in the credential
+                # sense, but it *is* the eligibility key for session reuse
+                # (`find_reusable_session` matches on it), and this rendering
+                # is not owner-scoped: t11's `swept_sessions` reports records
+                # the owner-agnostic sweep reaped, which can belong to other
+                # owners. Disclosing the key there would let one flow claim
+                # another's session. A caller identifies its own sessions by
+                # the token it minted, not by reading it back. (PR #15 review.)
+                "owner_token_set": bool(self.owner_token),
                 # ``None`` (never tracked) survives as JSON ``null``, and is
                 # not flattened to ``[]``: the two mean different things and
                 # a caller filtering on hosts must be able to tell them apart.

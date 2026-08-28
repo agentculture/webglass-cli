@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). This project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.3] - 2026-08-28
+
+### Fixed
+
+- The session `owner_token` value is no longer rendered in `to_public_dict()`; only `owner_token_set` is. The token is the eligibility key for session reuse, and that rendering is not owner-scoped -- `swept_sessions` carries records the owner-agnostic sweep reaped, which can belong to other owners (PR #15 review).
+
 ## [0.8.2] - 2026-08-28
 
 ### Fixed
