@@ -126,6 +126,7 @@ __all__ = [
     "RECORD_SCHEMA_VERSION",
     "SESSIONS_DIRNAME",
     "STATE_DIR_ENV",
+    "CorruptSessionRecord",
     "FileSessionRecord",
     "FileSessionStore",
     "LaunchedBrowser",
@@ -416,6 +417,28 @@ class FileSessionRecord(SessionRecord):
         return payload
 
 
+@dataclass(frozen=True)
+class CorruptSessionRecord:
+    """A session record file that exists but cannot be parsed, as reportable data.
+
+    :meth:`FileSessionStore.list` used to raise :class:`SessionRecordError`
+    the moment it hit one bad file (build plan task t12's doctor
+    session-store check would have inherited that: a health check must not
+    be taken down by the very condition it exists to report — issue #14
+    task t5). Reads now tolerate a corrupt record the same way
+    :meth:`FileSessionStore.clean` already does, but a read path must not
+    silently swallow the corruption either — this is the data a caller
+    (``session list``, and later the doctor check) renders instead of the
+    record it could not load. Deliberately carries no file contents: the
+    bytes that failed to parse might not even be JSON, so there is nothing
+    safe to echo back beyond the id, path, and parser's own message.
+    """
+
+    session_id: str
+    path: str
+    error: str
+
+
 class FileSessionStore:
     """A :class:`~webglass.sessions.SessionStore` whose state outlives the process.
 
@@ -507,12 +530,49 @@ class FileSessionStore:
         return self._read_unlocked(session_id)
 
     def list(self) -> list[FileSessionRecord]:
-        """Every stored record, oldest first. Raises on a corrupt one."""
-        records = [self._read_unlocked(sid) for sid in self._session_ids()]
-        return sorted(
-            (record for record in records if record is not None),
-            key=lambda record: (record.created_at, record.session_id),
-        )
+        """Every readable record, oldest first.
+
+        Tolerates a corrupt record file the same way :meth:`clean` does —
+        one unparseable record must not take down a read of every other
+        session (issue #14 task t5; a doctor health check is built on this
+        exact path). The record is skipped here, never purged (only
+        :meth:`clean` mutates); call :meth:`list_corrupt` to see what was
+        skipped and why.
+        """
+        records, _corrupt = self._list_all()
+        return records
+
+    def list_corrupt(self) -> list[CorruptSessionRecord]:
+        """Record files :meth:`list` had to skip because they would not parse.
+
+        A read path must not silently swallow corruption — this is how a
+        caller (``session list``, and the doctor session-store check built
+        on top of this store) learns *which* record is broken without
+        :meth:`list` itself raising.
+        """
+        _records, corrupt = self._list_all()
+        return corrupt
+
+    def _list_all(self) -> tuple[list[FileSessionRecord], list[CorruptSessionRecord]]:
+        records: list[FileSessionRecord] = []
+        corrupt: list[CorruptSessionRecord] = []
+        for session_id in self._session_ids():
+            try:
+                record = self._read_unlocked(session_id)
+            except SessionRecordError as exc:
+                corrupt.append(
+                    CorruptSessionRecord(
+                        session_id=session_id,
+                        path=str(self._record_path(session_id)),
+                        error=str(exc),
+                    )
+                )
+                continue
+            if record is not None:
+                records.append(record)
+        records.sort(key=lambda record: (record.created_at, record.session_id))
+        corrupt.sort(key=lambda item: item.session_id)
+        return records, corrupt
 
     def close(self, session_id: str) -> None:
         """Close a session and stop its browser.
