@@ -306,6 +306,46 @@ def _is_running(pid: int) -> bool:
     return _pid_liveness(pid) != "dead"
 
 
+def _lease_is_live(record: FileSessionRecord, now: float) -> bool:
+    """Whether ``record`` is leased *right now* — the store's liveness signal.
+
+    A lease is taken for the duration of one operation and released after
+    it, so "leased and not yet expired" is the closest thing this store has
+    to "a caller is driving this browser at this instant". :meth:`
+    FileSessionStore.clean` treats it as veto: see its docstring for why
+    liveness gates the sweep and ownership deliberately does not.
+    """
+    lease = record.lease
+    return lease is not None and lease.expires_at > now
+
+
+def _slid_expiry(record: FileSessionRecord, now: float) -> float:
+    """``record``'s expiry, slid forward to give it its full life again.
+
+    The record's original TTL needs no stored field, because the store
+    maintains ``expires_at - last_used_at == <the TTL it was created with>``
+    as an invariant: :meth:`FileSessionStore.create` writes
+    ``last_used_at = now`` and ``expires_at = now + ttl``, and every slide
+    here moves both by the same amount. Reading the lifetime back off that
+    difference is what keeps this change additive — no new record field, no
+    ``RECORD_SCHEMA_VERSION`` bump, and a record written by an older
+    WebGlass slides correctly the first time it is used.
+
+    Two guards, both ``max``-shaped so this can only ever *extend* a life:
+
+    * a record whose ``expires_at`` already precedes its ``last_used_at``
+      (only reachable by hand-writing a record file) yields a non-positive
+      lifetime, and is left exactly as it is rather than being retroactively
+      shortened or resurrected;
+    * a lease longer than the session's own TTL would otherwise leave the
+      record expiring while still held, so the lease's own expiry is a
+      floor — the record never promises less than the lease it just granted.
+    """
+    lifetime = record.expires_at - record.last_used_at
+    lease_floor = record.lease.expires_at if record.lease is not None else record.expires_at
+    return max(record.expires_at, now + lifetime, lease_floor)
+
+
 def _reap_child(pid: int) -> None:
     """Collect ``pid`` if it happens to be *this* process's child.
 
@@ -655,10 +695,10 @@ class FileSessionStore:
 
         Four separate jobs, in one deterministic pass:
 
-        1. an **active session past its ``expires_at``** becomes ``expired``,
-           its browser is terminated, and its profile directory is removed —
-           this is what keeps a crashed caller from leaving an orphan browser
-           alive forever;
+        1. an **active session past its ``expires_at`` that nobody is using**
+           becomes ``expired``, its browser is terminated, and its profile
+           directory is removed — this is what keeps a crashed caller from
+           leaving an orphan browser alive forever;
         2. an **expired lease on a still-live session** is dropped, so the
            next caller sees a free session rather than inferring liveness from
            a timestamp;
@@ -669,6 +709,19 @@ class FileSessionStore:
 
         Only case 1 is returned — those are the sessions a caller would call
         "reaped", and the service renders exactly them.
+
+        **Liveness gates case 1; ownership does not.** A record with a held,
+        unexpired lease is skipped whatever its ``expires_at`` says: a lease
+        is the one signal this store has that a browser is *in use right
+        now*, and killing a browser mid-operation is far worse than letting
+        a record live a few seconds past its clock (issue #14 task t6, spec
+        claim c28 / honesty h24). It becomes reapable again the moment the
+        lease lapses. Conversely a record belonging to a *different* owner is
+        reaped on exactly the same terms as our own — an expired, unleased
+        session means its owner finished or crashed, and refusing to reap it
+        would recreate the orphan-browser leak this method exists to prevent
+        (claim c38). The service says so out loud, reporting how many of the
+        sessions it reaped belonged to other callers.
         """
         reaped: list[FileSessionRecord] = []
         for session_id in self._session_ids():
@@ -679,6 +732,9 @@ class FileSessionStore:
                     self._purge_unlocked(session_id)
                     continue
                 if record is None:
+                    continue
+                if _lease_is_live(record, now):
+                    # In use. Not expired-but-idle, not orphaned: in use.
                     continue
                 if record.status is SessionStatus.ACTIVE and record.expires_at <= now:
                     record.status = SessionStatus.EXPIRED
@@ -711,6 +767,17 @@ class FileSessionStore:
         grabs), enforced across *processes* rather than across threads. The
         refusal is an ordinary return value: two CLI invocations racing for
         one browser is normal traffic, not an error.
+
+        Acquiring a lease also **slides the record's expiry forward**, which
+        the in-memory reference store has no reason to do and this one does:
+        ``expires_at`` used to be written once at :meth:`create` and never
+        touched again, so a session whose TTL (300 seconds for a CLI
+        throwaway) was shorter than one slow page load sat *past* its expiry
+        while its browser was genuinely working — one sweep away from being
+        killed mid-operation (issue #14 task t6). Using a session is the
+        evidence that it is still wanted, so the record gets its full
+        original lifetime again from this moment. See :func:`_slid_expiry`
+        for why that lifetime needs no stored field.
         """
         with self._locked(session_id):
             record = self._require_unlocked(session_id)
@@ -730,6 +797,10 @@ class FileSessionStore:
                     reason="lease_held",
                 )
             record.lease = Lease(holder=holder, acquired_at=now, expires_at=now + ttl_seconds)
+            # Order matters: the lifetime is read off the *pre-update*
+            # last_used_at, and the lease must already be set so an unusually
+            # long lease cannot outlive the record holding it.
+            record.expires_at = _slid_expiry(record, now)
             record.last_used_at = now
             self._write_unlocked(record)
             return LeaseGrant(
@@ -909,8 +980,22 @@ class FileSessionStore:
         record.diagnostics = record.diagnostics + tuple(launched.diagnostics)
 
     def _reap_browser(self, record: FileSessionRecord) -> None:
-        """Stop this session's browser and drop everything that names it."""
-        if record.pid is not None:
+        """Stop this session's browser and drop everything that names it.
+
+        Only a pid this store recorded is ever signalled, and only while it
+        still plausibly *is* our browser: a ``"foreign"`` probe (see
+        :func:`_pid_liveness`) means something answers at that pid but
+        belongs to another user, which on a long-lived host is pid reuse
+        after our browser already exited — not our browser under another
+        uid. Signalling it would be WebGlass reaching outside its own
+        processes, the exact failure issue #14 first appeared to be (the 187
+        "leaked" chromium processes were the reporter's desktop browser).
+        The reap continues for everything this store *does* own — the
+        endpoint and the profile directory still go — and the record reports
+        ``browser_reaped=False`` / ``browser_was_running=None``, its existing
+        spelling of "no attempt was made".
+        """
+        if record.pid is not None and _pid_liveness(record.pid) != "foreign":
             record.browser_was_running = bool(self.terminator(record.pid))
             record.browser_reaped = True
         # The endpoint names a browser that is gone: keeping it would be a
