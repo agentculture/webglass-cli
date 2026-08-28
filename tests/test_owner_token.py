@@ -211,11 +211,21 @@ def test_clean_reaps_expired_records_regardless_of_owner_token(tmp_path: Path) -
 
 
 def test_clean_signature_takes_no_owner_or_token_argument() -> None:
-    """Criterion 3, structurally: t7 must not have added owner filtering to clean()."""
+    """Criterion 3, structurally: t7 must not have added owner filtering to clean().
+
+    t9 (issue #14) later gave ``clean()`` its own keyword-only filter
+    parameters (``older_than_seconds``/``status``/``site``) -- none of them
+    named after ``owner`` or a ``token``, since c38/c39 (t7's own rationale,
+    still true) say ownership must never gate the sweep. This assertion
+    stays targeted at that specific claim rather than pinning the full
+    parameter set, so it does not need touching every time clean() grows an
+    unrelated filter.
+    """
     import inspect
 
-    params = inspect.signature(FileSessionStore.clean).parameters
-    assert set(params) == {"self", "now"}
+    params = set(inspect.signature(FileSessionStore.clean).parameters)
+    assert params >= {"self", "now"}
+    assert not any("owner" in name or "token" in name for name in params)
 
 
 # ---------------------------------------------------------------------------

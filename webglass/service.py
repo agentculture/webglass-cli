@@ -2247,7 +2247,29 @@ class WebGlassService:
     ) -> None:
         store: SessionStore = self._require(self.sessions, _SESSION_STORE_LABEL, "sessions")
         run.backend = self._backend_label(store)
-        reaped = store.clean(self.clock.now())
+        older_than_seconds = self._arg(run, "older_than_seconds", default=None)
+        status_raw = self._arg(run, "status", default=None)
+        site = self._arg(run, "site", default=None)
+        status: SessionStatus | None = None
+        if status_raw is not None:
+            try:
+                status = SessionStatus(status_raw)
+            except ValueError as exc:
+                valid = ", ".join(member.value for member in SessionStatus)
+                raise _Halt(
+                    LifecycleState.FAILED,
+                    OperationError(
+                        code=ERROR_INVALID_ARGUMENT,
+                        message=f"unknown session status: {status_raw!r}",
+                        remediation=f"use one of: {valid}",
+                    ),
+                ) from exc
+        reaped = store.clean(
+            self.clock.now(),
+            older_than_seconds=older_than_seconds,
+            status=status,
+            site=site,
+        )
         mine = [record for record in reaped if record.caller == run.context.caller]
         others = len(reaped) - len(mine)
         run.effect("sessions-expired")

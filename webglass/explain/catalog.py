@@ -610,10 +610,29 @@ the only gate: ownership is not. An expired, unleased session means its owner
 finished or crashed, so skipping it would leave exactly the orphan browser
 this verb exists to reap.
 
+`--older-than`/`--status`/`--site` narrow which records this sweep is
+allowed to touch, and compose as AND: a record must satisfy every filter
+that was passed. `--older-than` takes a number of seconds or a suffixed
+duration (`30s`, `10m`, `2h`, `7d`); a malformed value is a structured
+`invalid_argument` (exit 1), never a silently-substituted default.
+`--status` restricts to one lifecycle status (`active`/`expired`/`closed`).
+`--site` restricts to records that navigated to that host, matched against
+the record's top-level navigation set — a record with no tracked
+navigation history (pre-upgrade, or genuinely never navigated) is never
+matched by `--site`, since "unknown" and "confirmed not visited" are
+different states. These filters are evaluated inside the store under its
+per-record lock, the same one every other job in `clean` uses, so a filtered
+sweep cannot race a concurrent `clean` or lease call. An unmatched filter
+reaps nothing and exits 0, rather than falling back to an unfiltered sweep.
+
 ## Usage
 
     webglass session clean
     webglass session clean --json
+    webglass session clean --older-than 30d
+    webglass session clean --status expired
+    webglass session clean --site example.com
+    webglass session clean --older-than 1h --status active --site example.com
 """
 
 _SESSION_OVERVIEW = """\
