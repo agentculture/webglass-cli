@@ -907,6 +907,7 @@ class FileSessionStore:
         older_than_seconds: float | None = None,
         status: SessionStatus | None = None,
         site: str | None = None,
+        time_budget_seconds: float | None = None,
     ) -> list[FileSessionRecord]:
         """Reap expired sessions, their browsers, and their leftovers.
 
@@ -954,9 +955,28 @@ class FileSessionStore:
         other job in this loop uses, precisely so a caller can never read a
         record, decide it matches, and act on it in a way that races a
         concurrent ``clean`` or lease call in between.
+
+        ``time_budget_seconds`` (issue #14 task t10) makes the pass
+        **partial on purpose**: the deadline is checked before each record
+        and the loop stops the moment it passes, leaving the rest of the
+        store for the next caller. It exists for the opportunistic sweep
+        that now runs inside session-creating invocations — housekeeping the
+        caller did not ask for must never become the reason their page open
+        felt slow — and is measured on a monotonic clock rather than on
+        ``now``, because ``now`` is the *store's* logical time (often a
+        fixed test clock) while this bound is about wall-clock latency. The
+        default of ``None`` is unbounded, which is what the explicit
+        ``session clean`` verb wants: a caller who asked for a clean store
+        should get the whole store cleaned. Because the check happens
+        between records, a pass can overrun the budget by the cost of the
+        single record it is already working on; callers pick a budget with
+        room for that.
         """
+        deadline = None if time_budget_seconds is None else time.monotonic() + time_budget_seconds
         reaped: list[FileSessionRecord] = []
         for session_id in self._session_ids():
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             with self._locked(session_id):
                 try:
                     record = self._read_unlocked(session_id)
