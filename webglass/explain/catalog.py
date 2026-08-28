@@ -11,6 +11,12 @@ context without chaining reads.
 
 from __future__ import annotations
 
+from webglass.cli._session_wording import (
+    DEFAULT_EPHEMERAL_CLAIM,
+    FLOW_REUSE_CLAIM,
+    FRESH_SESSION_OPT_OUT_CLAIM,
+)
+
 _ROOT = """\
 # webglass-cli
 
@@ -252,7 +258,7 @@ app under test requires naming its origin in a `--policy-profile` file's
   - `webglass explain action`
 """
 
-_PAGE_OPEN = """\
+_PAGE_OPEN = f"""\
 # webglass page open <url>
 
 Navigate a session to `url` and retain the resulting `PageSnapshot` for later
@@ -267,6 +273,15 @@ explicitly, including on a page that produced none.
 An unreachable target (connection refused, DNS failure, navigation timeout)
 is a structured `navigation_failed` result telling you to check your server:
 WebGlass never starts, stops, or supervises the app under test.
+
+## Session lifecycle
+
+Without `--session-id`, `page open` runs in a throwaway session
+{DEFAULT_EPHEMERAL_CLAIM}, leaving no browser behind — unless
+{FLOW_REUSE_CLAIM}, in which case it may continue a session an earlier step
+of the same flow opened instead of opening a new one
+({FRESH_SESSION_OPT_OUT_CLAIM}). `--session-id` re-reads a session's live
+page without navigating it; see `webglass explain session`.
 
 ## Usage
 

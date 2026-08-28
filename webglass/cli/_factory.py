@@ -141,6 +141,11 @@ from webglass.adapters.session_store import (
 from webglass.cli._browser_doctor import _quiet_playwright_teardown_chatter
 from webglass.cli._errors import EXIT_ENV_ERROR, EXIT_SUCCESS, EXIT_USER_ERROR, CliError
 from webglass.cli._output import emit_error, emit_result
+from webglass.cli._session_wording import (  # noqa: F401 - re-exported for docstrings/callers
+    DEFAULT_EPHEMERAL_CLAIM,
+    FLOW_REUSE_CLAIM,
+    FRESH_SESSION_OPT_OUT_CLAIM,
+)
 from webglass.context import WebContext
 from webglass.effects import EffectClass, OperationKind
 from webglass.operations import ApplyState, CallerContext, OperationTarget, WebOperation
@@ -152,6 +157,9 @@ from webglass.sessions import DEFAULT_LEASE_TTL_SECONDS, LeaseGrant, SessionStat
 __all__ = [
     "BROWSER_BACKEND_ENV",
     "BROWSER_BACKENDS",
+    "DEFAULT_EPHEMERAL_CLAIM",
+    "FLOW_REUSE_CLAIM",
+    "FRESH_SESSION_OPT_OUT_CLAIM",
     "OPPORTUNISTIC_SWEEP_BUDGET_SECONDS",
     "POLICY_PROFILE_ENV",
     "REUSE_CANDIDATE_LIMIT",

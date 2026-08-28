@@ -173,3 +173,60 @@ def test_every_catalog_path_resolves(capsys: pytest.CaptureFixture[str]) -> None
         rc = main(["explain", *path])
         assert rc == 0, f"explain {' '.join(path)} failed"
         capsys.readouterr()
+
+
+def test_session_contract_wording_is_consistent(capsys: pytest.CaptureFixture[str]) -> None:
+    """The throwaway/reuse session contract must read the same everywhere.
+
+    Four user-facing surfaces describe it in prose: ``page``'s module
+    docstring, ``page overview``'s "Naming the page" section, ``explain page
+    open``, and ``session overview``'s Persistence section (build plan t15,
+    issue #14). Before t15 they had drifted — one surface described
+    flow-scoped reuse (build plan t13) while the other three still described
+    only the pre-t13 throwaway-only posture, and even the surfaces that did
+    agree on the default case used different wording for it.
+
+    Rather than re-reading four hand-written paragraphs for agreement every
+    time one changes, all four render the same three canonical fragments
+    from :mod:`webglass.cli._session_wording`. This test checks all three
+    fragments survive in all four — the same mechanical-guard shape as
+    ``test_every_catalog_path_resolves`` above, which guards the catalog
+    itself rather than trusting that every entry was kept up to date by eye.
+    """
+    import webglass.cli._commands.page as page_module
+    from webglass.cli._session_wording import (
+        DEFAULT_EPHEMERAL_CLAIM,
+        FLOW_REUSE_CLAIM,
+        FRESH_SESSION_OPT_OUT_CLAIM,
+    )
+
+    claims = (DEFAULT_EPHEMERAL_CLAIM, FLOW_REUSE_CLAIM, FRESH_SESSION_OPT_OUT_CLAIM)
+
+    def _normalized(text: str) -> str:
+        # Each surface wraps the same plain-text claims in whatever inline
+        # styling its own format uses: RST double-backticks and *emphasis*
+        # in the page module's docstring, Markdown single backticks in the
+        # explain catalog, and no markup at all in CLI overview text. Strip
+        # backtick/asterisk markup before comparing, so this checks the
+        # words rather than the formatting.
+        return text.replace("`", "").replace("*", "")
+
+    assert page_module.__doc__ is not None
+    surfaces: dict[str, str] = {"page module docstring": _normalized(page_module.__doc__)}
+
+    rc = main(["page", "overview"])
+    assert rc == 0
+    surfaces["page overview"] = _normalized(capsys.readouterr().out)
+
+    rc = main(["explain", "page", "open"])
+    assert rc == 0
+    surfaces["explain page open"] = _normalized(capsys.readouterr().out)
+
+    rc = main(["session", "overview"])
+    assert rc == 0
+    surfaces["session overview"] = _normalized(capsys.readouterr().out)
+
+    assert len(surfaces) == 4
+    for name, text in surfaces.items():
+        for claim in claims:
+            assert claim in text, f"{name!r} is missing the shared claim {claim!r}"
