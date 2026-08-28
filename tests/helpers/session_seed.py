@@ -29,19 +29,21 @@ Two building blocks:
 Forward-compatible, inert fields
 ---------------------------------
 
-Two build-plan tasks that depend on this one (t7's owner token, t8's
-navigated-host set) add fields to :class:`FileSessionRecord` that **do not
-exist yet**. :func:`seed_records` accepts ``owner_token`` and ``hosts``
-keyword arguments today so those tasks' tests can start calling this helper
-without a rewrite later, but it never invents the fields itself: it looks at
-:func:`dataclasses.fields` of the *current* :class:`FileSessionRecord` and
-only sets an attribute that is actually declared there. Passing ``hosts=``
-today is accepted and silently inert (nothing is written, because there is
-nowhere on the record to put it and no payload key to omit it from); once
-t8 adds the field, the very same call starts landing it on the record and
-flowing through ``_to_payload`` unchanged. Passing ``None`` (the default for
-both) always means "omitted from the written payload", on both sides of
-that boundary — never an explicit empty value.
+Two build-plan tasks that depend on this one add fields to
+:class:`FileSessionRecord`: t7's owner token (now landed) and t8's
+navigated-host set (still pending). :func:`seed_records` accepts
+``owner_token`` and ``hosts`` keyword arguments so those tasks' tests can
+call this helper without a rewrite, but it never invents a field itself: it
+looks at :func:`dataclasses.fields` of the *current* :class:`FileSessionRecord`
+and only sets an attribute that is actually declared there. ``owner_token``
+is declared as of t7, so passing it now lands on the record and flows
+through ``_to_payload`` for real; ``hosts`` has no field yet, so passing it
+today is still accepted and silently inert (nothing is written, because
+there is nowhere on the record to put it and no payload key to omit it
+from) — once t8 adds the field, the very same call starts landing it too.
+Passing ``None`` (the default for both) always means "omitted from the
+written payload", on both sides of that boundary — never an explicit empty
+value.
 """
 
 from __future__ import annotations
@@ -74,8 +76,8 @@ DEFAULT_BACKEND_ID = "seed-backend"
 
 #: Field names actually declared on the *current* record shape. Recomputed
 #: from the dataclass itself (never hand-copied) so this module notices the
-#: moment t7/t8 add ``owner_token``/``hosts`` — no separate list to forget to
-#: update.
+#: moment t8 adds ``hosts`` too — no separate list to forget to update.
+#: (t7's ``owner_token`` already showed up here the moment that field landed.)
 _RECORD_FIELDS = {field.name for field in dataclasses.fields(FileSessionRecord)}
 
 

@@ -136,11 +136,15 @@ def test_seed_records_round_trips_through_the_store(session_store: FileSessionSt
 def test_seed_records_forward_compatible_kwargs_are_inert_today(
     session_store: FileSessionStore,
 ) -> None:
-    """``owner_token``/``hosts`` are accepted now, ahead of build plan t7/t8.
+    """``hosts`` is still accepted-but-inert, ahead of build plan t8.
 
-    Neither field exists on :class:`FileSessionRecord` yet, so passing them
-    must not raise, and must not silently invent a payload key that
-    ``_to_payload`` does not know about.
+    ``owner_token`` is no longer forward-compatible-only: build plan t7 has
+    landed the field on :class:`FileSessionRecord`, so ``_set_if_declared``
+    now sets it for real (see ``tests/test_owner_token.py``, which is where
+    that behavior is characterized in full). ``hosts`` has no field yet
+    (that is t8's job), so passing it here must still not raise and must
+    still not silently invent a payload key that ``_to_payload`` does not
+    know about.
     """
     (record,) = seed_records(
         session_store,
@@ -151,7 +155,7 @@ def test_seed_records_forward_compatible_kwargs_are_inert_today(
     )
     read_back = session_store.get(record.session_id)
     assert read_back is not None
-    assert not hasattr(read_back, "owner_token")
+    assert read_back.owner_token == "tok-123"
     assert not hasattr(read_back, "hosts")
 
 
@@ -159,7 +163,7 @@ def test_seed_records_omitted_forward_compatible_kwargs_stay_omitted(
     session_store: FileSessionStore,
 ) -> None:
     (record,) = seed_records(session_store, count=1, status=SessionStatus.CLOSED)
-    assert not hasattr(record, "owner_token")
+    assert record.owner_token == ""
     assert not hasattr(record, "hosts")
 
 

@@ -458,6 +458,28 @@ class FileSessionRecord(SessionRecord):
         The outcome of a close/clean: whether this store terminated the
         browser, and whether it found it alive to terminate. ``None`` means
         no attempt was made.
+    ``owner_token``
+        A per-invocation token identifying the *client* that created this
+        session — distinct from :attr:`caller`, which is a fixed constant
+        (``"cli"``) shared by every CLI-issued operation and therefore
+        useless for telling concurrent invocations apart (build plan t7,
+        issue #14 claims c35/c38/c39). Scoped **narrowly**: it exists only to
+        decide whether a *later* invocation may treat an existing session as
+        "mine" for reuse — see :func:`webglass.cli._factory.ephemeral_session`,
+        which mints a fresh one with ``uuid4`` on every throwaway session it
+        creates. It deliberately does **not** gate :meth:`FileSessionStore.clean`:
+        c38/c39 supersede the earlier design, because an expired record's
+        owner is by definition finished or crashed, so reaping it is safe
+        regardless of who owned it — and owner-filtering the sweep would make
+        it useless (a one-shot invocation owns exactly one session and would
+        reap nothing). Liveness gates the sweep; ownership gates reuse only.
+        Defaults to ``""``, which means "no token was ever recorded" — a
+        pre-upgrade record loaded through :func:`_from_payload` gets this
+        default, and ``""`` is never treated as a wildcard or as equal to any
+        real owner's token, so an old record is claimed by nobody's reuse
+        query. Not a secret (unlike :attr:`~webglass.sessions.SessionRecord.
+        endpoint_ref`, it grants no control over the browser by itself), so it
+        is rendered in both ``repr()`` and :meth:`to_public_dict`.
 
     ``repr=False`` is load-bearing, not style: ``@dataclass`` generates a
     ``__repr__`` by default, and a generated one would print *every* field —
@@ -472,6 +494,7 @@ class FileSessionRecord(SessionRecord):
     diagnostics: tuple[str, ...] = ()
     browser_reaped: bool = False
     browser_was_running: bool | None = None
+    owner_token: str = ""
 
     def to_public_dict(self) -> dict[str, Any]:
         """The base record's safe dict, plus the process facts — never the endpoint.
@@ -503,6 +526,7 @@ class FileSessionRecord(SessionRecord):
                 "browser_reaped": self.browser_reaped,
                 "browser_was_running": self.browser_was_running,
                 "observed_liveness": self._observed_liveness(),
+                "owner_token": self.owner_token,
             }
         )
         return payload
@@ -583,6 +607,7 @@ class FileSessionStore:
         expires_at: float,
         capability_profile_ref: Any = None,
         endpoint_ref: str = "",
+        owner_token: str = "",
     ) -> FileSessionRecord:
         """Create, persist, and (if a launcher is wired) launch a session.
 
@@ -590,6 +615,14 @@ class FileSessionStore:
         launch — that is how a caller attaches a session record to a browser
         it started itself, and how the endpoint-secrecy tests plant a known
         secret without needing Chromium.
+
+        ``owner_token`` is not part of the :class:`~webglass.sessions.SessionStore`
+        protocol (it is a :class:`FileSessionRecord`-only field, build plan
+        t7) — an optional keyword with a safe ``""`` default, so every
+        existing caller of this method keeps compiling and behaving exactly
+        as before. It is the caller's job to mint a fresh one per invocation
+        (see :func:`webglass.cli._factory.ephemeral_session`); this method
+        only stores whatever it is handed.
         """
         _validate_session_id(session_id)
         with self._locked(session_id):
@@ -612,6 +645,7 @@ class FileSessionStore:
                 lease=None,
                 endpoint_ref=endpoint_ref,
                 diagnostics=notes,
+                owner_token=owner_token,
             )
             if not endpoint_ref and self.launcher is not None:
                 self._launch(record)
@@ -1043,6 +1077,10 @@ def _to_payload(record: FileSessionRecord) -> dict[str, Any]:
         "diagnostics": list(record.diagnostics),
         "browser_reaped": record.browser_reaped,
         "browser_was_running": record.browser_was_running,
+        # Additive (build plan t7): a pre-t7 payload has no such key, and
+        # `.get(..., "")` on the read side is what makes that record load
+        # under the same RECORD_SCHEMA_VERSION rather than forcing a bump.
+        "owner_token": record.owner_token,
     }
 
 
@@ -1090,6 +1128,12 @@ def _from_payload(payload: Any, path: Path) -> FileSessionRecord:
                 if payload.get("browser_was_running") is None
                 else bool(payload["browser_was_running"])
             ),
+            # Additive default (build plan t7): a record written before this
+            # field existed has no ``owner_token`` key at all, and ``""`` is
+            # the "claimed by nobody" value — never a wildcard, never equal
+            # to a real owner's token — so a pre-upgrade record is never
+            # matched by any owner's reuse query (acceptance criterion 2).
+            owner_token=str(payload.get("owner_token", "")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SessionRecordError(f"session record {path} is malformed: {exc}") from exc
