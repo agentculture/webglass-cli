@@ -560,6 +560,12 @@ _SESSION_SHOW = """\
 # webglass session show <session-id>
 
 Show one session's public record (its redacted shape — no connect endpoint).
+The record's `observed_liveness` (`running` / `dead` / `unknown`) is a
+signal-0 probe of the recorded pid taken fresh at render time, never a
+stored status: a record left `active` by a crashed caller renders as `dead`
+rather than reading as live forever, and a pid that answers but is owned by
+another user (near-certain pid reuse) reports `unknown` rather than being
+claimed as our browser. Reading never mutates the record's stored status.
 
 ## Usage
 
