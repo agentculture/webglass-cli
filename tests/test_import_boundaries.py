@@ -169,3 +169,45 @@ def test_playwright_is_the_only_runtime_dependency() -> None:
     # silently change the Chromium revision every install (t14 reports the
     # pinned versions in `doctor`).
     assert any(bound in dependencies[0] for bound in (">=", "==", "~=")), dependencies[0]
+
+
+def test_session_plane_imports_no_evidence_exploration_or_memory() -> None:
+    """Build plan task t14: session-lifecycle plane stays free of M3 stubs.
+
+    The session plane consists of ``webglass/sessions.py`` (the interface)
+    and ``webglass/adapters/session_store.py`` (the file-backed implementation).
+    These modules must never import the M3 placeholder modules
+    (``evidence.py``, ``exploration.py``, ``memory.py``) to prevent coupling
+    between the session lifecycle and the (still-unimplemented) durable
+    artifact stores. This boundary is load-bearing: each concern should be
+    testable and swappable independently.
+    """
+    session_modules: list[Path] = [
+        _PACKAGE_ROOT / "sessions.py",
+        _PACKAGE_ROOT / "adapters" / "session_store.py",
+    ]
+    forbidden_modules = ("evidence", "exploration", "memory")
+    offenders: list[str] = []
+
+    for path in session_modules:
+        if not path.exists():
+            # A missing module is not an offense; it may not exist yet in this
+            # variant of the codebase.
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in forbidden_modules or alias.name.startswith(
+                        tuple(f"{mod}." for mod in forbidden_modules)
+                    ):
+                        offenders.append(f"{path}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and (
+                    node.module in forbidden_modules
+                    or any(node.module.startswith(f"{mod}.") for mod in forbidden_modules)
+                ):
+                    offenders.append(f"{path}: from {node.module} import ...")
+    assert (
+        not offenders
+    ), "session plane must not import evidence/exploration/memory:\n" + "\n".join(offenders)
