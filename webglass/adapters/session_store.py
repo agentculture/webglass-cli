@@ -165,7 +165,9 @@ _FILE_MODE = 0o600
 #: purges it. Closed/expired records stay readable by ``session show`` for a
 #: while (an agent asking "what happened to my session?" deserves an answer),
 #: but not forever — an unbounded directory of dead records is a disk leak.
-DEFAULT_RECORD_RETENTION_SECONDS = 7 * 24 * 60 * 60.0
+#: The 3-day window is kept so repeated visits can be found and mapped for
+#: reuse, not as a forensics window.
+DEFAULT_RECORD_RETENTION_SECONDS = 3 * 24 * 60 * 60.0
 
 #: Session ids become filenames, so they are validated rather than trusted:
 #: ``../`` or an absolute path in a caller-supplied ``--session-id`` must never
