@@ -288,11 +288,144 @@ def test_default_state_dir_falls_back_to_dot_local_state(monkeypatch: pytest.Mon
 
 
 # ---------------------------------------------------------------------------
+# session_store_health (build plan task t12, issue #14)
+# ---------------------------------------------------------------------------
+
+
+def test_session_store_health_reports_zero_on_an_empty_store(
+    session_store: object,
+) -> None:
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert check["id"] == "session_store_health"
+    assert check["severity"] == "info"
+    assert check["passed"] is True
+    assert "0 session record" in check["message"]
+
+
+def test_session_store_health_counts_live_and_stale_separately(
+    session_store: object, seed_session_records: object
+) -> None:
+    from webglass.sessions import SessionStatus
+
+    seed_session_records(count=3, status=SessionStatus.CLOSED)  # type: ignore[operator]
+    seed_session_records(  # type: ignore[operator]
+        count=2, status=SessionStatus.ACTIVE, pid=spawn_dead_pid_group(2)
+    )
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert check["passed"] is True
+    assert "2 stale" in check["message"]
+    assert "0 live" in check["message"]
+
+
+def spawn_dead_pid_group(_count: int) -> int:
+    """Return a single already-dead pid, reused across a batch of seeded records.
+
+    ``seed_records`` writes one shared ``pid`` value across the whole batch
+    it is called with, so a genuinely distinct dead pid per record is not
+    needed here (and would cost one subprocess spawn each) — the liveness
+    check only cares whether *this* pid answers, not whether it is unique.
+    """
+    from tests.helpers.session_seed import spawn_dead_pid
+
+    return spawn_dead_pid()
+
+
+def test_session_store_health_reports_record_directory_size(
+    session_store: object, seed_session_records: object
+) -> None:
+    from webglass.sessions import SessionStatus
+
+    seed_session_records(count=3, status=SessionStatus.CLOSED)  # type: ignore[operator]
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert "record directory size" in check["message"]
+    # A non-empty store must report a positive size, never a hardcoded 0 --
+    # this is what would catch a check that "counts" without ever touching
+    # the filesystem's own byte-size story.
+    store_dir = session_store.directory  # type: ignore[attr-defined]
+    directory_size = sum(f.stat().st_size for f in store_dir.rglob("*") if f.is_file())
+    assert directory_size > 0
+    assert str(directory_size) in check["message"]
+
+
+def test_session_store_health_warns_above_ten_live_sessions_for_one_owner(
+    session_store: object, seed_session_records: object
+) -> None:
+    """The 10/11 boundary this task's acceptance criteria pin directly.
+
+    ``seed_records`` writes a live ``pid`` (this test process's own pid,
+    which is always "running") when given no ``pid`` argument only if the
+    default is a live one -- so this test passes ``pid=os.getpid()``
+    explicitly to guarantee every seeded record's ``observed_liveness`` is
+    ``"running"``, the "live" bucket this check counts against the
+    threshold.
+    """
+    import os
+
+    from webglass.sessions import SessionStatus
+
+    seed_session_records(  # type: ignore[operator]
+        count=10, status=SessionStatus.ACTIVE, pid=os.getpid(), owner="one-owner"
+    )
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert check["severity"] == "info"
+    assert check["passed"] is True
+    assert "10 live" in check["message"]
+
+
+def test_session_store_health_warns_at_eleven_live_sessions_for_one_owner(
+    session_store: object, seed_session_records: object
+) -> None:
+    import os
+
+    from webglass.sessions import SessionStatus
+
+    seed_session_records(  # type: ignore[operator]
+        count=11, status=SessionStatus.ACTIVE, pid=os.getpid(), owner="one-owner"
+    )
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert check["severity"] == "warning"
+    # Advisory checks never fail doctor's exit code, even at the threshold.
+    assert check["passed"] is True
+    assert "one-owner" in check["message"]
+    assert "11 live" in check["message"]
+
+
+def test_session_store_health_surfaces_corrupt_records_without_raising(
+    session_store: object, seed_session_records: object
+) -> None:
+    from webglass.sessions import SessionStatus
+
+    seed_session_records(count=1, status=SessionStatus.CLOSED)  # type: ignore[operator]
+    corrupt_path = session_store.directory / "corrupt-session.json"  # type: ignore[attr-defined]
+    corrupt_path.write_text("{not valid json", encoding="utf-8")
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert check["passed"] is True
+    assert "1 corrupt" in check["message"]
+
+
+def test_session_store_health_is_read_only_and_takes_no_lock(
+    session_store: object, seed_session_records: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance criterion 3: no browser launch, no lock, no record mutation."""
+    from webglass.adapters.session_store import FileSessionStore
+    from webglass.sessions import SessionStatus
+
+    seed_session_records(count=2, status=SessionStatus.ACTIVE)  # type: ignore[operator]
+
+    def _forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("session_store_health must never take the store's write lock")
+
+    monkeypatch.setattr(FileSessionStore, "_locked", _forbidden, raising=False)
+    check = bd.check_session_store_health(session_store.directory)  # type: ignore[attr-defined]
+    assert check["id"] == "session_store_health"
+
+
+# ---------------------------------------------------------------------------
 # browser_checks(): shape and ordering
 # ---------------------------------------------------------------------------
 
 
-def test_browser_checks_returns_the_five_checks_in_acceptance_order() -> None:
+def test_browser_checks_returns_the_six_checks_in_acceptance_order() -> None:
     checks = bd.browser_checks()
     assert [c["id"] for c in checks] == [
         "playwright_importable",
@@ -300,6 +433,7 @@ def test_browser_checks_returns_the_five_checks_in_acceptance_order() -> None:
         "playwright_version",
         "usable_sandbox",
         "state_dir_writable",
+        "session_store_health",
     ]
     for check in checks:
         assert {"id", "passed", "severity", "message", "remediation"} <= set(check)
@@ -314,6 +448,7 @@ def test_browser_checks_severities_match_the_acceptance_criteria() -> None:
         "playwright_version": "info",
         "usable_sandbox": "warning",
         "state_dir_writable": "info",
+        "session_store_health": "info",
     }
 
 
@@ -334,6 +469,7 @@ def test_diagnose_includes_the_browser_checks_after_the_identity_checks() -> Non
         "playwright_version",
         "usable_sandbox",
         "state_dir_writable",
+        "session_store_health",
     ]
 
 
@@ -505,4 +641,5 @@ def test_default_suite_never_needs_the_browser_test_env_var(
         "playwright_version",
         "usable_sandbox",
         "state_dir_writable",
+        "session_store_health",
     }
