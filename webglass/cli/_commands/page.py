@@ -29,10 +29,18 @@ they are checked in this order:
 
 With none of them, a verb that needs a page reports a structured
 ``invalid_argument``; a verb that navigates (``open``) runs in a throwaway
-session that is created and closed within the invocation — unless
+session that is created and closed within this invocation — unless
 ``$WEBGLASS_SESSION_OWNER`` declares this invocation part of a *flow*, in
 which case it may continue a session an earlier step of the same flow opened
 (``--fresh-session`` opts out per call; see :func:`_factory.ephemeral_session`).
+
+This is the same throwaway/reuse contract described in ``page overview``'s
+"Naming the page" section, ``webglass explain page open``, and ``webglass
+session overview``'s Persistence section — see
+:data:`webglass.cli._factory.DEFAULT_EPHEMERAL_CLAIM`,
+:data:`~webglass.cli._factory.FLOW_REUSE_CLAIM`, and
+:data:`~webglass.cli._factory.FRESH_SESSION_OPT_OUT_CLAIM`, which those four
+surfaces all render verbatim (build plan t15, issue #14).
 """
 
 from __future__ import annotations
@@ -75,8 +83,11 @@ _OVERVIEW_SECTIONS = [
             "--url <url> opens the URL and applies the verb in one operation.",
             "--session-id <id> re-reads that session's live page without navigating it — "
             "the way to see what an earlier CLI invocation's press or open did.",
-            "With none of them, 'page open' runs in a throwaway session created and "
-            "closed inside the invocation, leaving no browser behind.",
+            "With none of them, 'page open' runs in a throwaway session "
+            f"{_factory.DEFAULT_EPHEMERAL_CLAIM}, leaving no browser behind — unless "
+            f"{_factory.FLOW_REUSE_CLAIM}, in which case it may continue a session an "
+            "earlier step of the same flow opened instead of opening a new one "
+            f"({_factory.FRESH_SESSION_OPT_OUT_CLAIM}).",
         ],
     },
     {
@@ -226,7 +237,9 @@ def cmd_page_screenshot(args: argparse.Namespace) -> int:
 
 _SESSION_ID_HELP = (
     "Run in this session (from 'session create'). Without it, a page verb that "
-    "navigates runs in a throwaway session created and closed inside this invocation."
+    f"navigates runs in a throwaway session {_factory.DEFAULT_EPHEMERAL_CLAIM} — unless "
+    f"{_factory.FLOW_REUSE_CLAIM}, in which case it may continue that flow's own session "
+    f"instead ({_factory.FRESH_SESSION_OPT_OUT_CLAIM})."
 )
 
 

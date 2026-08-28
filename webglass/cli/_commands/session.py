@@ -20,7 +20,7 @@ import argparse
 import re
 from typing import Any
 
-from webglass.cli import _factory
+from webglass.cli import _factory, _session_wording
 from webglass.cli._commands.overview import emit_overview
 from webglass.cli._errors import EXIT_USER_ERROR, CliError
 from webglass.effects import OperationKind
@@ -82,10 +82,28 @@ _OVERVIEW_SECTIONS = [
             "Concurrent use is serialized by a lease: a second holder gets a structured "
             "refusal rather than sharing one live browser, and a crashed holder's lease "
             "frees itself at expiry.",
+            "A session-creating page verb (e.g. 'page open') without --session-id runs in "
+            f"a throwaway session {_session_wording.DEFAULT_EPHEMERAL_CLAIM} — unless "
+            f"{_session_wording.FLOW_REUSE_CLAIM}, in which case it may continue a session "
+            "an earlier step of the same flow opened, matched by the host it last visited, "
+            f"instead of opening a new one ({_session_wording.FRESH_SESSION_OPT_OUT_CLAIM}). "
+            "A reused session is retained rather than closed; results report which "
+            "happened as 'session_reused'. See 'webglass explain page open'.",
+            "Each record's status/pid are checked against the running process and reported "
+            "as observed_liveness (running/dead/unknown); a record whose browser process is "
+            "gone is dead regardless of its stored status.",
+            "A session record becomes eligible for reaping once it is closed, expired, or "
+            "dead, and it is older than the 3-day retention window. Every session-creating "
+            "invocation also spends a small, time-bounded slice sweeping this store on its "
+            "own, so records do not silently pile up between explicit runs of "
+            "'session clean' — the sweep may still leave records behind if it runs out of "
+            "its time budget first.",
             "session clean reaps expired sessions, terminates their browser processes, "
             "and removes their profile directories. --older-than/--status/--site narrow "
             "which records are eligible and compose as AND; an unmatched filter reaps "
-            "nothing rather than falling back to reaping everything.",
+            "nothing rather than falling back to reaping everything. --site matches a "
+            "record's top-level navigation hosts (capped at 32) and cannot match a "
+            "pre-upgrade record whose hosts are unknown.",
         ],
     },
     {
