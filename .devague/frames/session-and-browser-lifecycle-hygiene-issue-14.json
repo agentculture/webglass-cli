@@ -4,7 +4,7 @@
   "schema_version": 5,
   "status": "exported",
   "created": "2026-08-28T11:05:11Z",
-  "updated": "2026-08-28T12:41:03Z",
+  "updated": "2026-08-28T12:44:58Z",
   "claims": [
     {
       "id": "c1",
@@ -749,6 +749,25 @@
       "links": [],
       "instruction": "Mint a unique owner id per invocation; a continuation call passes the prior id explicitly to claim eligibility.",
       "revisions": []
+    },
+    {
+      "id": "c40",
+      "kind": "decision",
+      "text": "--site records TOP-LEVEL NAVIGATION HOSTS ONLY \u2014 never subresource hosts (CDNs, fonts, analytics, third-party frames) \u2014 and matches on ANY host in that set. The set stays a handful of entries instead of dozens, behaves the way the flag reads, and is the same set repetition-mapping (c23) needs for 'have we seen this host?', so one field serves both. Accepted tradeoff: a session that visited a host once among several is reaped by --site for that host; reaping a finished session is cheap.",
+      "origin": "user",
+      "status": "proposed",
+      "honesty_conditions": [
+        {
+          "id": "h34",
+          "text": "A test loads a page pulling subresources from other hosts and asserts only the navigated document host is recorded; a second asserts --site matches a session that visited the host among several, and that a redirect chain records the hosts actually navigated to.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Record the host on top-level navigation commit only, deduplicated and bounded; match --site against set membership. Never hook subresource requests.",
+      "revisions": []
     }
   ],
   "open_vagueness": [
@@ -757,8 +776,8 @@
       "text": "Whether the opportunistic sweep should be bounded by count (reap at most N records per invocation) or by time (spend at most Nms), and what that bound is. Both keep 'page open' fast; a count bound is deterministic and testable, a time bound degrades gracefully on a slow filesystem.",
       "kind": "unknown_nonblocking",
       "claim_id": null,
-      "resolved": false,
-      "resolution": "",
+      "resolved": true,
+      "resolution": "The sweep is bounded by TIME: it spends at most a fixed budget per invocation and stops, degrading gracefully on a slow filesystem rather than blocking a fast one behind a fixed record count. Ties to c37's under-50ms target.",
       "resolution_claim_id": null
     },
     {
@@ -775,8 +794,8 @@
       "text": "Whether non-Linux hosts are in scope for the sweep. terminate_pid uses os.kill/SIGTERM/SIGKILL and _locked uses fcntl.flock (session_store.py:290-327, 696-708) \u2014 both POSIX-only, and the store is already Linux-shaped before this change. The sweep does not make it worse, but automating process termination raises the cost of the assumption if it is ever wrong.",
       "kind": "unknown_nonblocking",
       "claim_id": null,
-      "resolved": false,
-      "resolution": "",
+      "resolved": true,
+      "resolution": "Confirmed POSIX-only. terminate_pid's os.kill/SIGTERM/SIGKILL and _locked's fcntl.flock are accepted platform constraints; the store is already Linux-shaped and the sweep does not widen that.",
       "resolution_claim_id": null
     },
     {
