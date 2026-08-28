@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the webglass-cli test suite.
 
-Two things live here:
+Three things live here:
 
 * the local fixture-site HTTP server (see ``tests/fixtures/server.py``): a
   stdlib-only ``http.server`` instance bound to 127.0.0.1 on an OS-assigned
@@ -11,20 +11,39 @@ Two things live here:
   depends on a live public website (issue #1 section 18; CLAUDE.md "Test
   ownership");
 * an autouse guard that keeps every test's *session* state, and its browser
-  posture, inside the test run (see :func:`isolated_session_state`).
+  posture, inside the test run (see :func:`isolated_session_state`);
+* a session-store seeding fixture (:func:`session_store` /
+  :func:`seed_session_records`, backed by ``tests/helpers/session_seed.py``,
+  build plan task t1) that later session-lifecycle tasks' tests build their
+  "before state" from, instead of hand-rolling
+  :class:`~webglass.adapters.session_store.FileSessionRecord` construction
+  per test module.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 
 from tests.fixtures.server import FixtureSite
+from tests.helpers.session_seed import seed_records
 from webglass.adapters.brave import WEBGLASS_BRAVE_API_KEY_ENV
-from webglass.adapters.session_store import ALLOW_UNSANDBOXED_ENV, STATE_DIR_ENV
+from webglass.adapters.session_store import (
+    ALLOW_UNSANDBOXED_ENV,
+    STATE_DIR_ENV,
+    FileSessionRecord,
+    FileSessionStore,
+    default_sessions_dir,
+)
 from webglass.cli._factory import BROWSER_BACKEND_ENV, POLICY_PROFILE_ENV
+
+#: What :func:`seed_session_records` hands back to a test: call it with the
+#: same keyword arguments as :func:`tests.helpers.session_seed.seed_records`
+#: (minus ``store``, which is bound already) any number of times against the
+#: one store the fixture returned.
+SeedSessionRecords = Callable[..., list[FileSessionRecord]]
 
 
 @pytest.fixture(autouse=True)
@@ -80,3 +99,40 @@ def fixture_site() -> Iterator[str]:
         yield base_url
     finally:
         site.stop()
+
+
+@pytest.fixture()
+def session_store() -> FileSessionStore:
+    """A :class:`FileSessionStore` rooted at this test's isolated state dir.
+
+    Deliberately built on top of :func:`isolated_session_state` (autouse,
+    runs first) rather than duplicating its ``tmp_path`` handling: this
+    fixture just resolves :func:`default_sessions_dir`, which reads
+    ``$WEBGLASS_STATE_DIR`` -- already pinned to a fresh per-test directory
+    by the time this fixture body runs. Any CLI invocation a test makes
+    under the same environment (in-process or via ``subprocess`` with the
+    environment copied forward) sees the exact same on-disk records this
+    fixture seeds.
+    """
+    return FileSessionStore(default_sessions_dir())
+
+
+@pytest.fixture()
+def seed_session_records(session_store: FileSessionStore) -> SeedSessionRecords:
+    """A callable that seeds ``session_store`` with records of a chosen shape.
+
+    Thin binding over :func:`tests.helpers.session_seed.seed_records` --
+    see that module for the full contract (status/expiry/owner/host-set
+    selection, the forward-compatible ``owner_token``/``hosts`` seams for
+    build plan tasks t7/t8, and why records are written directly rather than
+    through :meth:`~webglass.adapters.session_store.FileSessionStore.create`).
+    A test calls this fixture once per distinct record shape it needs, e.g.
+    once for a batch of ``closed`` records and again for a batch of
+    ``active`` records with a dead pid, all landing in the one
+    ``session_store``.
+    """
+
+    def _seed(**kwargs: object) -> list[FileSessionRecord]:
+        return seed_records(session_store, **kwargs)  # type: ignore[arg-type]
+
+    return _seed
