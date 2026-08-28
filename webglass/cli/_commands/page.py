@@ -29,7 +29,10 @@ they are checked in this order:
 
 With none of them, a verb that needs a page reports a structured
 ``invalid_argument``; a verb that navigates (``open``) runs in a throwaway
-session that is created and closed within the invocation.
+session that is created and closed within the invocation — unless
+``$WEBGLASS_SESSION_OWNER`` declares this invocation part of a *flow*, in
+which case it may continue a session an earlier step of the same flow opened
+(``--fresh-session`` opts out per call; see :func:`_factory.ephemeral_session`).
 """
 
 from __future__ import annotations
@@ -123,7 +126,11 @@ def _run(
     service, context = _factory.build_invocation(args)
     requested = getattr(args, "session_id", None)
     with _factory.ephemeral_session(
-        service, requested, provision=_navigates(kind, target)
+        service,
+        requested,
+        provision=_navigates(kind, target),
+        reuse=not bool(getattr(args, "fresh_session", False)),
+        hosts=_factory.target_hosts(target.url if target is not None else None),
     ) as session:
         operation = _factory.build_operation(
             service,
@@ -133,6 +140,7 @@ def _run(
             target=target,
             session_id=session.session_id,
             session_ephemeral=session.ephemeral,
+            session_reused=session.reused,
         )
         result = service.execute(operation, context)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
@@ -232,6 +240,16 @@ def _add_page_selection(parser: argparse.ArgumentParser, verb: str) -> None:
 def _finish(parser: argparse.ArgumentParser, handler: Any) -> None:
     """The flags and defaults every web verb shares."""
     _factory.add_policy_profile_argument(parser)
+    parser.add_argument(
+        "--fresh-session",
+        action="store_true",
+        help=(
+            "Never continue an earlier session: run in a brand-new anonymous one, "
+            "created and closed inside this invocation. Only meaningful when "
+            f"${_factory.SESSION_OWNER_ENV} declares this call part of a flow; "
+            "without that variable every call is already anonymous."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help=_JSON_HELP)
     parser.set_defaults(func=handler)
 

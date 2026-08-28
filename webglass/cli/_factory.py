@@ -113,7 +113,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,9 +129,12 @@ from webglass.adapters.browser import BrowserBackend
 from webglass.adapters.clock import Clock, IdProvider  # noqa: F401 - re-exported for callers
 from webglass.adapters.search import SearchProvider
 from webglass.adapters.session_store import (
+    FileSessionRecord,
     FileSessionStore,
     SessionLauncher,
     SessionLaunchError,
+    SessionRecordError,
+    _hosts_from_urls,
     default_sessions_dir,
     make_playwright_launcher,
 )
@@ -144,11 +147,14 @@ from webglass.operations import ApplyState, CallerContext, OperationTarget, WebO
 from webglass.policy import PolicyError, WebPolicyEvaluator, WebPolicyProfile
 from webglass.results import LifecycleState, OperationError, WebOperationResult
 from webglass.service import WebGlassService
+from webglass.sessions import DEFAULT_LEASE_TTL_SECONDS, LeaseGrant, SessionStatus
 
 __all__ = [
     "BROWSER_BACKEND_ENV",
     "BROWSER_BACKENDS",
     "POLICY_PROFILE_ENV",
+    "REUSE_CANDIDATE_LIMIT",
+    "SESSION_OWNER_ENV",
     "ProvisionedSession",
     "SystemClock",
     "UuidIds",
@@ -164,6 +170,9 @@ __all__ = [
     "build_session_store",
     "declared_target_effect_class",
     "ephemeral_session",
+    "find_reusable_session",
+    "target_hosts",
+    "flow_owner_token",
     "render_operation_result",
     "reset_browser_backends",
 ]
@@ -212,6 +221,14 @@ _DEFAULT_TASK = "cli"
 _DEFAULT_EVIDENCE_NAMESPACE = "cli"
 _DEFAULT_POLICY_PROFILE_REF = "built-in-default"
 
+#: The lease holder string a CLI invocation takes sessions under. It mirrors
+#: :meth:`webglass.service.WebGlassService._lease_holder`'s ``caller:task``
+#: rule against this module's fixed identity constants, and mirroring it is
+#: load-bearing: :func:`find_reusable_session` probes a candidate by actually
+#: acquiring its lease, and the operation that follows must *renew* that lease
+#: rather than collide with it.
+_LEASE_HOLDER = f"{_DEFAULT_CALLER}:{_DEFAULT_TASK}"
+
 
 def _new_owner_token() -> str:
     """Mint a fresh owner token for one throwaway session (build plan t7).
@@ -232,6 +249,40 @@ def _new_owner_token() -> str:
     without memoizing it anywhere.
     """
     return uuid.uuid4().hex
+
+
+#: Names the **flow** an invocation belongs to, and is the whole opt-in to
+#: session reuse (build plan t13). Exported with the same value by two
+#: consecutive ``webglass`` calls, it says "these are one continuation": the
+#: second may reuse the session the first opened. Unset — the default, and
+#: what every ordinary invocation sees — every call is anonymous and opens
+#: its own throwaway session, exactly as before.
+#:
+#: It is an environment variable rather than a flag because it identifies
+#: something *outside* any one invocation: a one-shot CLI process cannot
+#: discover on its own that another process was the previous step of its
+#: flow. The caller that drives both steps is the only one that knows.
+SESSION_OWNER_ENV = "WEBGLASS_SESSION_OWNER"
+
+#: How many of a flow's most recent sessions a reuse match examines (spec
+#: claim c23's "last 3"). Small on purpose: reuse continues *the flow's
+#: current work*, and reaching further back would start resembling a session
+#: cache keyed by host — which is not what this is.
+REUSE_CANDIDATE_LIMIT = 3
+
+
+def flow_owner_token(environ: Mapping[str, str] | None = None) -> str:
+    """The owner token identifying this invocation's flow, or ``""``.
+
+    ``""`` — an unset or blank :data:`SESSION_OWNER_ENV` — means "no flow":
+    :func:`find_reusable_session` matches nothing against it, so an invocation
+    without one can neither continue an earlier session nor leave one behind
+    for someone else to continue. That is the safe default, and it is also
+    what makes the empty ``owner_token`` on a pre-upgrade record unclaimable
+    (build plan t7): emptiness never matches emptiness.
+    """
+    env = os.environ if environ is None else environ
+    return env.get(SESSION_OWNER_ENV, "").strip()
 
 
 #: How long an auto-created throwaway session is allowed to live. It is closed
@@ -613,11 +664,99 @@ class ProvisionedSession:
 
     session_id: str | None
     ephemeral: bool = False
+    reused: bool = False
+
+
+def target_hosts(url: str | None) -> tuple[str, ...]:
+    """The host set a reuse match for ``url`` should look for.
+
+    Reduced with the session store's *own* URL-to-host function, never a
+    second one written here: a record's ``hosts`` were written by that
+    function (build plan t8), and a differently-spelled host — a port left
+    on, a case difference, embedded userinfo — would silently never match.
+    An invocation with no URL yields nothing, and so reuses nothing.
+    """
+    return tuple(_hosts_from_urls([url] if url else []))
+
+
+def find_reusable_session(
+    store: FileSessionStore,
+    *,
+    owner_token: str,
+    hosts: Sequence[str],
+    now: float,
+    holder: str = _LEASE_HOLDER,
+    limit: int = REUSE_CANDIDATE_LIMIT,
+) -> FileSessionRecord | None:
+    """The flow's own live session for one of ``hosts``, or ``None``.
+
+    Four independent gates, and each one is a *refusal to guess*:
+
+    ``owner_token``
+        Only a record this flow itself opened is eligible (build plan t7). An
+        empty token — either side of the comparison — matches nothing: a
+        pre-upgrade record carries ``""`` and is nobody's to claim, and an
+        invocation with no flow token has no flow to continue. Sessions are
+        never shared across tasks (issue #1 section 2); this is what keeps
+        "reuse" from quietly becoming that.
+    ``limit``
+        Only the flow's most recent :data:`REUSE_CANDIDATE_LIMIT` sessions are
+        examined, ordered by ``last_used_at`` (spec claim c23). A flow that
+        has moved on to other work does not reach back through its whole
+        history for a match.
+    liveness
+        Only an ``ACTIVE`` record still inside its ``expires_at``. A closed or
+        expired one is a **tombstone**: :meth:`FileSessionStore.close` reaps
+        the browser and deletes the profile directory, so there is no browser
+        to reattach to and no cookie left to inherit. This is physics, not
+        policy — the 3-day retention window keeps the *mapping*, never the
+        session.
+    ``hosts``
+        The record must already have visited one of them (build plan t8).
+        ``hosts is None`` means the record predates host tracking — *unknown*,
+        which is neither a wildcard nor a known non-match, so it is skipped.
+        An invocation that cannot name a host reuses nothing.
+
+    The lease is the last gate and is taken by *acquiring* it, never by
+    reading it: a record whose lease another holder is driving right now
+    refuses the acquisition and is passed over rather than stolen. A granted
+    lease is deliberately left held — the operation that follows renews it
+    under the same holder string this function used.
+    """
+    wanted = {host for host in hosts if host}
+    if not owner_token or not wanted:
+        return None
+    mine = [
+        record
+        for record in store.list()
+        if record.owner_token and record.owner_token == owner_token
+    ]
+    mine.sort(key=lambda record: record.last_used_at, reverse=True)
+    for record in mine[:limit]:
+        if record.status is not SessionStatus.ACTIVE or record.expires_at <= now:
+            continue
+        if record.hosts is None or not wanted.intersection(record.hosts):
+            continue
+        try:
+            outcome = store.acquire_lease(record.session_id, holder, now, DEFAULT_LEASE_TTL_SECONDS)
+        except (KeyError, SessionRecordError):
+            # A concurrent ``session clean`` reaped it between the listing and
+            # the acquisition. Nothing is wrong: it is simply not a session to
+            # continue, and falling back to a fresh one is always safe.
+            continue
+        if isinstance(outcome, LeaseGrant):
+            return record
+    return None
 
 
 @contextmanager
 def ephemeral_session(
-    service: WebGlassService, requested: str | None, *, provision: bool = True
+    service: WebGlassService,
+    requested: str | None,
+    *,
+    provision: bool = True,
+    reuse: bool = True,
+    hosts: Sequence[str] = (),
 ) -> Iterator[ProvisionedSession]:
     """Yield the session an operation should run in, creating one if needed.
 
@@ -646,6 +785,27 @@ def ephemeral_session(
     :attr:`ProvisionedSession.ephemeral`; every pass-through yields ``False``,
     because a session this function did not create is one whose lifetime it
     does not own.
+
+    Flow-scoped reuse (build plan t13)
+    ----------------------------------
+    All of the above is the *anonymous* posture, and it stays the default. It
+    is also three browser launches for one agent taking three steps through
+    one site, so a caller that declares itself a **flow** — by exporting
+    :data:`SESSION_OWNER_ENV` — gets continuation instead:
+
+    * a session matching ``hosts`` that this flow already opened is reused
+      (:func:`find_reusable_session`) and its **generation bumped**, so a
+      reference the caller minted before the reuse is refused as stale rather
+      than resolved against a different element;
+    * a session created *for* a flow is retained rather than closed on the way
+      out — a step that reaped its own session would leave the next step
+      nothing to continue. It still carries the ephemeral TTL, so an
+      abandoned flow's session is reaped by the next ``session clean``.
+
+    ``reuse=False`` is the per-invocation opt-out (the CLI spells it
+    ``--fresh-session``): a brand-new anonymous session, whatever the
+    environment says. Reuse never happens without a flow token, so an
+    ordinary invocation is unaffected either way.
     """
     if requested is not None or not provision:
         yield ProvisionedSession(requested)
@@ -654,6 +814,24 @@ def ephemeral_session(
     if service.browser is None or not isinstance(store, FileSessionStore):
         yield ProvisionedSession(None)
         return
+
+    flow_token = flow_owner_token() if reuse else ""
+    if flow_token:
+        # Deliberately ahead of the launcher check below: a session being
+        # continued already has its browser: it needs no launcher to reattach,
+        # only an endpoint the store already recorded.
+        matched = find_reusable_session(
+            store, owner_token=flow_token, hosts=hosts, now=service.clock.now()
+        )
+        if matched is not None:
+            # The bump is the correctness step, not bookkeeping: without it a
+            # stale 'link:12' from the previous step could resolve against
+            # this step's page (spec honesty h27).
+            store.bump_generation(matched.session_id)
+            # Not ours to close — the flow owns it, and the next step needs it.
+            yield ProvisionedSession(matched.session_id, reused=True)
+            return
+
     if store.launcher is None:
         # A file store with no launcher records sessions without starting a
         # browser; creating one here would hand the backend an endpoint-less
@@ -673,7 +851,7 @@ def ephemeral_session(
             now=now,
             expires_at=now + _EPHEMERAL_SESSION_TTL_SECONDS,
             capability_profile_ref=_DEFAULT_POLICY_PROFILE_REF,
-            owner_token=_new_owner_token(),
+            owner_token=flow_token or _new_owner_token(),
         )
     except SessionLaunchError as exc:
         # The sandbox-unavailable path lands here. It is an environment/setup
@@ -682,6 +860,12 @@ def ephemeral_session(
         raise CliError(
             code=EXIT_ENV_ERROR, message=exc.message, remediation=exc.remediation
         ) from exc
+    if flow_token:
+        # The first step of a flow: retained, so the next step has something
+        # to continue. Its lifetime belongs to the flow, not to this
+        # invocation, so it is neither labelled ephemeral nor closed here.
+        yield ProvisionedSession(session_id)
+        return
     try:
         yield ProvisionedSession(session_id, ephemeral=True)
     finally:
@@ -700,6 +884,7 @@ def build_operation(
     target: OperationTarget | None = None,
     session_id: str | None = None,
     session_ephemeral: bool = False,
+    session_reused: bool = False,
     apply_state: ApplyState = ApplyState.PREVIEW,
 ) -> WebOperation:
     """Build one ``WebOperation`` from parsed CLI args and the current context.
@@ -710,10 +895,10 @@ def build_operation(
     ``service.execute`` itself would use for any internal id), so a
     CLI-issued operation id and a library-issued one are indistinguishable.
 
-    ``session_ephemeral`` comes straight from :class:`ProvisionedSession` and
-    defaults to ``False`` — the operation model's own default, so a library
-    caller and a CLI caller who both named their own session build an
-    identical operation.
+    ``session_ephemeral`` and ``session_reused`` come straight from
+    :class:`ProvisionedSession` and both default to ``False`` — the operation
+    model's own defaults, so a library caller and a CLI caller who both named
+    their own session build an identical operation.
     """
     return WebOperation(
         operation_id=service.ids.new_id("operation"),
@@ -729,6 +914,7 @@ def build_operation(
         ),
         session_id=session_id,
         session_ephemeral=session_ephemeral,
+        session_reused=session_reused,
         target=target if target is not None else OperationTarget(),
         apply_state=apply_state,
     )

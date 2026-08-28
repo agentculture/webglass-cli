@@ -1184,6 +1184,8 @@ def test_a_library_caller_navigating_a_session_it_created_is_not_ephemeral() -> 
     assert result.content.trusted["session"] == {
         "session_id": session_id,
         "ephemeral": False,
+        # Nor is it a session continued from an earlier step of a flow (t13).
+        "reused": False,
     }
 
 
