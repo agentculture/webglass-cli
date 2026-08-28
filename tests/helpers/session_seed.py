@@ -26,24 +26,27 @@ Two building blocks:
   names which count was wrong — this is what makes the 134/115/19 baseline
   a *reproducible* assertion rather than a comment.
 
-Forward-compatible, inert fields
----------------------------------
+Forward-compatible fields (both now landed)
+--------------------------------------------
 
-Two build-plan tasks that depend on this one add fields to
-:class:`FileSessionRecord`: t7's owner token (now landed) and t8's
-navigated-host set (still pending). :func:`seed_records` accepts
-``owner_token`` and ``hosts`` keyword arguments so those tasks' tests can
-call this helper without a rewrite, but it never invents a field itself: it
-looks at :func:`dataclasses.fields` of the *current* :class:`FileSessionRecord`
-and only sets an attribute that is actually declared there. ``owner_token``
-is declared as of t7, so passing it now lands on the record and flows
-through ``_to_payload`` for real; ``hosts`` has no field yet, so passing it
-today is still accepted and silently inert (nothing is written, because
-there is nowhere on the record to put it and no payload key to omit it
-from) — once t8 adds the field, the very same call starts landing it too.
+Two build-plan tasks that depend on this one added fields to
+:class:`FileSessionRecord`: t7's ``owner_token`` and t8's ``hosts``
+(navigated document hosts). :func:`seed_records` accepted both keyword
+arguments before either field existed, so those tasks' tests could call this
+helper without a rewrite — but it never invents a field itself: it looks at
+:func:`dataclasses.fields` of the *current* :class:`FileSessionRecord` and
+only sets an attribute that is actually declared there. Both are declared
+now, so passing either lands on the record and flows through ``_to_payload``
+for real; the seam is kept because it is how the *next* such field arrives
+without touching every call site.
+
 Passing ``None`` (the default for both) always means "omitted from the
-written payload", on both sides of that boundary — never an explicit empty
-value.
+written payload" — never an explicit empty value. For ``hosts`` that
+distinction is the field's whole point: ``None`` is *unknown* (nothing ever
+tracked this record's navigations, which is exactly right for a record
+written straight to disk rather than created through the store) and ``()``
+is *tracked, and it went nowhere*. Pass ``hosts=()`` explicitly to seed the
+second.
 """
 
 from __future__ import annotations
@@ -75,9 +78,10 @@ DEFAULT_TASK = "seed-task"
 DEFAULT_BACKEND_ID = "seed-backend"
 
 #: Field names actually declared on the *current* record shape. Recomputed
-#: from the dataclass itself (never hand-copied) so this module notices the
-#: moment t8 adds ``hosts`` too — no separate list to forget to update.
-#: (t7's ``owner_token`` already showed up here the moment that field landed.)
+#: from the dataclass itself (never hand-copied), so a field added to the
+#: record shows up here the moment it lands — no separate list to forget to
+#: update. That is how t7's ``owner_token`` and t8's ``hosts`` each went from
+#: accepted-but-inert to written, with no edit to this line.
 _RECORD_FIELDS = {field.name for field in dataclasses.fields(FileSessionRecord)}
 
 
@@ -148,10 +152,13 @@ def seed_records(
     an ``active`` one seeded as still-within-lease; pass an already-past
     value explicitly to seed an *expired* record instead.
 
-    ``hosts``/``owner_token`` are forward-compatible seams for build-plan
-    tasks t8/t7 -- see the module docstring. They are accepted here whether
-    or not the underlying field exists yet, and never break this call
-    either way.
+    ``hosts``/``owner_token`` (build-plan tasks t8/t7) are set only when the
+    record actually declares them -- see the module docstring. Both do
+    today; the mechanism stays because it is what lets a future field be
+    passed here before it exists. Omitting ``hosts`` leaves the seeded
+    record's host set *unknown* (``None``), which is the honest reading for a
+    record written straight to disk; pass ``hosts=()`` for a tracked,
+    known-empty one.
     """
     if count < 0:
         raise ValueError(f"count must be >= 0, got {count}")
