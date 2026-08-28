@@ -89,6 +89,10 @@ _OVERVIEW_SECTIONS = [
             f"instead of opening a new one ({_session_wording.FRESH_SESSION_OPT_OUT_CLAIM}). "
             "A reused session is retained rather than closed; results report which "
             "happened as 'session_reused'. See 'webglass explain page open'.",
+            "A session-creating invocation sweeps expired sessions on its way past, so the "
+            "store does not depend on anyone running 'session clean'. The sweep is "
+            "time-bounded (a large store may take several invocations to drain) and never "
+            f"runs on a read verb: {_session_wording.SWEEP_DISCLOSURE_CLAIM}.",
             "Each record's status/pid are checked against the running process and reported "
             "as observed_liveness (running/dead/unknown); a record whose browser process is "
             "gone is dead regardless of its stored status.",

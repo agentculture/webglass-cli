@@ -39,8 +39,14 @@ This is the same throwaway/reuse contract described in ``page overview``'s
 session overview``'s Persistence section — see
 :data:`webglass.cli._factory.DEFAULT_EPHEMERAL_CLAIM`,
 :data:`~webglass.cli._factory.FLOW_REUSE_CLAIM`, and
-:data:`~webglass.cli._factory.FRESH_SESSION_OPT_OUT_CLAIM`, which those four
+:data:`~webglass.cli._factory.FRESH_SESSION_OPT_OUT_CLAIM`, and
+:data:`~webglass.cli._factory.SWEEP_DISCLOSURE_CLAIM`, which those four
 surfaces all render verbatim (build plan t15, issue #14).
+
+A session-creating invocation also sweeps expired sessions on its way past —
+time-bounded, so a large store may take several invocations to drain, and
+never on a read verb: ``swept_sessions names any expired sessions reaped on
+the way past``.
 """
 
 from __future__ import annotations
@@ -88,6 +94,9 @@ _OVERVIEW_SECTIONS = [
             f"{_factory.FLOW_REUSE_CLAIM}, in which case it may continue a session an "
             "earlier step of the same flow opened instead of opening a new one "
             f"({_factory.FRESH_SESSION_OPT_OUT_CLAIM}).",
+            "A session-creating invocation sweeps expired sessions on its way past "
+            "(time-bounded; a read verb never sweeps): "
+            f"{_factory.SWEEP_DISCLOSURE_CLAIM}.",
         ],
     },
     {
@@ -239,7 +248,8 @@ _SESSION_ID_HELP = (
     "Run in this session (from 'session create'). Without it, a page verb that "
     f"navigates runs in a throwaway session {_factory.DEFAULT_EPHEMERAL_CLAIM} — unless "
     f"{_factory.FLOW_REUSE_CLAIM}, in which case it may continue that flow's own session "
-    f"instead ({_factory.FRESH_SESSION_OPT_OUT_CLAIM})."
+    f"instead ({_factory.FRESH_SESSION_OPT_OUT_CLAIM}). Such an invocation also sweeps "
+    f"expired sessions on its way past: {_factory.SWEEP_DISCLOSURE_CLAIM}."
 )
 
 

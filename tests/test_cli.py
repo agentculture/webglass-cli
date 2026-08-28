@@ -198,9 +198,15 @@ def test_session_contract_wording_is_consistent(capsys: pytest.CaptureFixture[st
         DEFAULT_EPHEMERAL_CLAIM,
         FLOW_REUSE_CLAIM,
         FRESH_SESSION_OPT_OUT_CLAIM,
+        SWEEP_DISCLOSURE_CLAIM,
     )
 
-    claims = (DEFAULT_EPHEMERAL_CLAIM, FLOW_REUSE_CLAIM, FRESH_SESSION_OPT_OUT_CLAIM)
+    claims = (
+        DEFAULT_EPHEMERAL_CLAIM,
+        FLOW_REUSE_CLAIM,
+        FRESH_SESSION_OPT_OUT_CLAIM,
+        SWEEP_DISCLOSURE_CLAIM,
+    )
 
     def _normalized(text: str) -> str:
         # Each surface wraps the same plain-text claims in whatever inline
@@ -209,7 +215,14 @@ def test_session_contract_wording_is_consistent(capsys: pytest.CaptureFixture[st
         # explain catalog, and no markup at all in CLI overview text. Strip
         # backtick/asterisk markup before comparing, so this checks the
         # words rather than the formatting.
-        return text.replace("`", "").replace("*", "")
+        #
+        # Whitespace is collapsed for the same reason: every surface hard-wraps
+        # to its own width, so a claim longer than one line arrives split by a
+        # newline and indentation in one surface and not in another. Without
+        # this, the guard would silently depend on each claim being short
+        # enough never to wrap — which is a property of the line width, not of
+        # the wording it is supposed to be checking.
+        return " ".join(text.replace("`", "").replace("*", "").split())
 
     assert page_module.__doc__ is not None
     surfaces: dict[str, str] = {"page module docstring": _normalized(page_module.__doc__)}
@@ -230,3 +243,19 @@ def test_session_contract_wording_is_consistent(capsys: pytest.CaptureFixture[st
     for name, text in surfaces.items():
         for claim in claims:
             assert claim in text, f"{name!r} is missing the shared claim {claim!r}"
+
+
+def test_session_owner_env_name_matches_the_factory() -> None:
+    """The duplicated ``SESSION_OWNER_ENV`` names cannot drift apart.
+
+    ``webglass.cli._session_wording`` deliberately re-declares this constant
+    rather than importing it, so that ``webglass.explain.catalog`` — loaded on
+    every ``explain`` invocation — does not pull in ``_factory``'s adapter and
+    service import graph. That duplication is the right trade, but its own
+    docstring notes nothing checked the two agreed. This is that check: a
+    renamed environment variable would otherwise leave ``explain`` telling
+    callers to set a name the code no longer reads.
+    """
+    from webglass.cli import _factory, _session_wording
+
+    assert _session_wording.SESSION_OWNER_ENV == _factory.SESSION_OWNER_ENV

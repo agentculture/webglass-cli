@@ -43,6 +43,7 @@ __all__ = [
     "DEFAULT_EPHEMERAL_CLAIM",
     "FLOW_REUSE_CLAIM",
     "FRESH_SESSION_OPT_OUT_CLAIM",
+    "SWEEP_DISCLOSURE_CLAIM",
 ]
 
 #: Mirrors :data:`webglass.cli._factory.SESSION_OWNER_ENV` — duplicated here
@@ -61,3 +62,11 @@ FLOW_REUSE_CLAIM = f"${SESSION_OWNER_ENV} declares this invocation part of a flo
 
 #: The per-call opt-out of that continuation.
 FRESH_SESSION_OPT_OUT_CLAIM = "--fresh-session opts out per call"
+
+#: What the opportunistic sweep (build plan t10) discloses about itself
+#: (build plan t11). A session-creating invocation reaps expired sessions on
+#: its way past; the records it took are named in the result rather than
+#: vanishing silently, because terminating a browser and deleting its profile
+#: directory is irreversible and happened as a side effect of asking for
+#: something else.
+SWEEP_DISCLOSURE_CLAIM = "swept_sessions names any expired sessions reaped on the way past"

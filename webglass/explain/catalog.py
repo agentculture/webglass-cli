@@ -15,6 +15,7 @@ from webglass.cli._session_wording import (
     DEFAULT_EPHEMERAL_CLAIM,
     FLOW_REUSE_CLAIM,
     FRESH_SESSION_OPT_OUT_CLAIM,
+    SWEEP_DISCLOSURE_CLAIM,
 )
 
 _ROOT = """\
@@ -282,6 +283,10 @@ Without `--session-id`, `page open` runs in a throwaway session
 of the same flow opened instead of opening a new one
 ({FRESH_SESSION_OPT_OUT_CLAIM}). `--session-id` re-reads a session's live
 page without navigating it; see `webglass explain session`.
+
+A session-creating invocation also sweeps expired sessions on its way past
+(time-bounded, so a large store may take several invocations to drain, and a
+read verb never sweeps): {SWEEP_DISCLOSURE_CLAIM}.
 
 ## Usage
 

@@ -145,6 +145,7 @@ from webglass.cli._session_wording import (  # noqa: F401 - re-exported for docs
     DEFAULT_EPHEMERAL_CLAIM,
     FLOW_REUSE_CLAIM,
     FRESH_SESSION_OPT_OUT_CLAIM,
+    SWEEP_DISCLOSURE_CLAIM,
 )
 from webglass.context import WebContext
 from webglass.effects import EffectClass, OperationKind
@@ -160,6 +161,7 @@ __all__ = [
     "DEFAULT_EPHEMERAL_CLAIM",
     "FLOW_REUSE_CLAIM",
     "FRESH_SESSION_OPT_OUT_CLAIM",
+    "SWEEP_DISCLOSURE_CLAIM",
     "OPPORTUNISTIC_SWEEP_BUDGET_SECONDS",
     "POLICY_PROFILE_ENV",
     "REUSE_CANDIDATE_LIMIT",
