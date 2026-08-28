@@ -114,19 +114,25 @@ def _run(
     ``--session-id``, :func:`webglass.cli._factory.ephemeral_session` supplies
     a throwaway session for the duration of the operation and closes it
     afterwards (see that function on why a *stored* record is required).
+
+    Because that throwaway *is* a stored session, its ephemerality has to ride
+    along on the operation: nothing downstream can tell it apart from a
+    caller-owned session by looking at the id, which is why every CLI
+    navigation used to report ``ephemeral: false`` (issue #14).
     """
     service, context = _factory.build_invocation(args)
     requested = getattr(args, "session_id", None)
     with _factory.ephemeral_session(
         service, requested, provision=_navigates(kind, target)
-    ) as session_id:
+    ) as session:
         operation = _factory.build_operation(
             service,
             context,
             kind,
             normalized_args=normalized_args,
             target=target,
-            session_id=session_id,
+            session_id=session.session_id,
+            session_ephemeral=session.ephemeral,
         )
         result = service.execute(operation, context)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))

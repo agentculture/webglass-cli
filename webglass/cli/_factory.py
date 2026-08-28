@@ -115,6 +115,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,7 @@ __all__ = [
     "BROWSER_BACKEND_ENV",
     "BROWSER_BACKENDS",
     "POLICY_PROFILE_ENV",
+    "ProvisionedSession",
     "SystemClock",
     "UuidIds",
     "add_policy_profile_argument",
@@ -575,11 +577,27 @@ def build_invocation(args: argparse.Namespace) -> tuple[WebGlassService, WebCont
     return service, build_context(context_overrides)
 
 
+@dataclass(frozen=True)
+class ProvisionedSession:
+    """The session an operation will run in, and who owns its lifetime.
+
+    :func:`ephemeral_session` yields this rather than a bare id because the
+    two facts are inseparable and only the provisioner knows the second one.
+    A CLI throwaway is a *real stored* session (the browser backend resolves
+    an endpoint through the store), so downstream code cannot recover
+    ``ephemeral`` by looking at the id — which is precisely how every CLI
+    navigation came to report ``ephemeral: false`` in issue #14.
+    """
+
+    session_id: str | None
+    ephemeral: bool = False
+
+
 @contextmanager
 def ephemeral_session(
     service: WebGlassService, requested: str | None, *, provision: bool = True
-) -> Iterator[str | None]:
-    """Yield the session id an operation should run in, creating one if needed.
+) -> Iterator[ProvisionedSession]:
+    """Yield the session an operation should run in, creating one if needed.
 
     ``provision=False`` makes this a pass-through unconditionally — for a verb
     that will not drive a browser to a URL (a lens over a retained snapshot,
@@ -601,19 +619,24 @@ def ephemeral_session(
     ``None`` unchanged: the service then reports the structured
     ``backend_unavailable`` result, which is the correct answer and is not
     improved by provisioning a session first.
+
+    Only the branch that actually mints a throwaway sets
+    :attr:`ProvisionedSession.ephemeral`; every pass-through yields ``False``,
+    because a session this function did not create is one whose lifetime it
+    does not own.
     """
     if requested is not None or not provision:
-        yield requested
+        yield ProvisionedSession(requested)
         return
     store = getattr(service, "sessions", None)
     if service.browser is None or not isinstance(store, FileSessionStore):
-        yield None
+        yield ProvisionedSession(None)
         return
     if store.launcher is None:
         # A file store with no launcher records sessions without starting a
         # browser; creating one here would hand the backend an endpoint-less
         # record. Let the operation report the missing capability instead.
-        yield None
+        yield ProvisionedSession(None)
         return
 
     session_id = service.ids.new_id("ephemeral")
@@ -637,7 +660,7 @@ def ephemeral_session(
             code=EXIT_ENV_ERROR, message=exc.message, remediation=exc.remediation
         ) from exc
     try:
-        yield session_id
+        yield ProvisionedSession(session_id, ephemeral=True)
     finally:
         # Best-effort by design: a browser that already died must not turn a
         # completed observation into a failure.
@@ -653,6 +676,7 @@ def build_operation(
     normalized_args: Mapping[str, Any] | None = None,
     target: OperationTarget | None = None,
     session_id: str | None = None,
+    session_ephemeral: bool = False,
     apply_state: ApplyState = ApplyState.PREVIEW,
 ) -> WebOperation:
     """Build one ``WebOperation`` from parsed CLI args and the current context.
@@ -662,6 +686,11 @@ def build_operation(
     minted from the *service's own* injected ``IdProvider`` (the same one
     ``service.execute`` itself would use for any internal id), so a
     CLI-issued operation id and a library-issued one are indistinguishable.
+
+    ``session_ephemeral`` comes straight from :class:`ProvisionedSession` and
+    defaults to ``False`` — the operation model's own default, so a library
+    caller and a CLI caller who both named their own session build an
+    identical operation.
     """
     return WebOperation(
         operation_id=service.ids.new_id("operation"),
@@ -676,6 +705,7 @@ def build_operation(
             ),
         ),
         session_id=session_id,
+        session_ephemeral=session_ephemeral,
         target=target if target is not None else OperationTarget(),
         apply_state=apply_state,
     )
