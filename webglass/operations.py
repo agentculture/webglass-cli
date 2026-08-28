@@ -182,6 +182,17 @@ class WebOperation:
     ``WebOperation`` can never carry a classification that disagrees with its
     own kind (the acceptance condition "every operation kind declares exactly
     one effect class").
+
+    ``session_ephemeral`` says whether ``session_id`` names a session the
+    *caller* owns or a throwaway the operation's provisioner will close on the
+    way out. It has to be carried rather than inferred: the CLI provisions a
+    real stored session for a one-shot navigation (the browser backend
+    resolves an endpoint through the store, so an unstored id reaches no
+    browser), which makes ``session_id is None`` a test of how the operation
+    was *spelled*, not of what the session's lifetime actually is — the
+    mislabelling issue #14 reported. Only the component that owns that
+    lifetime sets this; ``False`` is the safe default, since a session nobody
+    declared throwaway must never be reported as one.
     """
 
     operation_id: str
@@ -189,6 +200,7 @@ class WebOperation:
     normalized_args: Mapping[str, Any] = field(default_factory=dict)
     caller: CallerContext = field(default_factory=CallerContext)
     session_id: str | None = None
+    session_ephemeral: bool = False
     exploration_id: str | None = None
     target: OperationTarget = field(default_factory=OperationTarget)
     cache_mode: CacheMode = CacheMode.LIVE
@@ -217,6 +229,7 @@ class WebOperation:
             "normalized_args": dict(self.normalized_args),
             "caller": self.caller.to_dict(),
             "session_id": self.session_id,
+            "session_ephemeral": self.session_ephemeral,
             "exploration_id": self.exploration_id,
             "target": self.target.to_dict(),
             "cache_mode": self.cache_mode.value,

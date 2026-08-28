@@ -1189,13 +1189,24 @@ class WebGlassService:
         that is deliberately not stored: an anonymous, unshared context is the
         safe default (issue #1 section 2, "isolated per caller/task"), and
         persisting one would create session state no caller asked for.
+
+        Otherwise the reported ``ephemeral`` flag is read off the operation's
+        ``session_ephemeral``, never inferred from the id being absent. A
+        caller can hand us a session id *and* own its throwaway lifetime — the
+        CLI does exactly that for a one-shot navigation, because the browser
+        backend resolves a connect endpoint through the session store, so an
+        unstored id reaches no browser. Inferring from ``session_id is None``
+        therefore labelled every CLI navigation ``ephemeral: false``, the
+        mislabelling issue #14 reported. Library and CLI now render the same
+        field from the same source.
         """
         session_id = run.operation.session_id
         if session_id is None:
             ephemeral = self.ids.new_id("session")
             return ephemeral, {"session_id": ephemeral, "ephemeral": True}
         self._require_session(run, session_id, lease=True)
-        return session_id, {"session_id": session_id, "ephemeral": False}
+        ephemeral = bool(run.operation.session_ephemeral)
+        return session_id, {"session_id": session_id, "ephemeral": ephemeral}
 
     # -- reference helpers --------------------------------------------------
 
@@ -1632,7 +1643,13 @@ class WebGlassService:
         run.backend = self._backend_label(browser)
         session_id = str(run.operation.session_id)
         self._require_session(run, session_id, lease=True)
-        run.trusted["session"] = {"session_id": session_id, "ephemeral": False, "live_read": True}
+        run.trusted["session"] = {
+            "session_id": session_id,
+            # Read off the operation, not assumed — same field, same source as
+            # _session_for_navigation (issue #14).
+            "ephemeral": bool(run.operation.session_ephemeral),
+            "live_read": True,
+        }
 
         reader = getattr(browser, "current", None)
         if not callable(reader):
