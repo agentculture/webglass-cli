@@ -129,13 +129,19 @@ def _run(
     that is what was asked), and a read verb that quietly rewrote the store
     it was asked to describe would be deleting the evidence out from under
     exactly the investigation issue #14 was.
+
+    What it reaped still has to be told to the caller (build plan t11), so it
+    is threaded into ``execute`` as the separate ``swept=`` parameter rather
+    than dropped on the floor here — that keeps the disclosure outside the
+    operation itself while still making it reachable on the result.
     """
     service = _factory.build_service()
     context = _factory.build_context()
+    swept: tuple[Any, ...] = ()
     if sweep:
-        _factory.sweep_session_store(service)
+        swept = _factory.sweep_session_store(service)
     operation = _factory.build_operation(service, context, kind, normalized_args=normalized_args)
-    result = service.execute(operation, context)
+    result = service.execute(operation, context, swept=swept)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
 
 

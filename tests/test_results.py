@@ -167,6 +167,7 @@ def test_full_field_set_round_trips_through_to_dict_and_json() -> None:
         ),
         policy_verdict=PolicyVerdict(decision="allow", matched_rule_ids=("r1", "r7")),
         known_effects=("navigation-occurred",),
+        swept_sessions=({"session_id": "stale-active", "status": "expired"},),
         evidence_refs=("evidence:abc123",),
         navigation_history=(
             NavigationHop(requested_url="https://example.test/", response_url=None, status=200),
@@ -188,6 +189,7 @@ def test_full_field_set_round_trips_through_to_dict_and_json() -> None:
     assert payload["content"]["derived"]["outline"] == ["h1: Example Domain"]
     assert payload["policy_verdict"] == {"decision": "allow", "matched_rule_ids": ["r1", "r7"]}
     assert payload["known_effects"] == ["navigation-occurred"]
+    assert payload["swept_sessions"] == [{"session_id": "stale-active", "status": "expired"}]
     assert payload["evidence_refs"] == ["evidence:abc123"]
     assert payload["navigation_history"] == [
         {"requested_url": "https://example.test/", "response_url": None, "status": 200}
@@ -224,6 +226,7 @@ def test_minimal_result_to_dict_has_all_top_level_keys() -> None:
         "content",
         "policy_verdict",
         "known_effects",
+        "swept_sessions",
         "evidence_refs",
         "navigation_history",
         "cache",

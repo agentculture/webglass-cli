@@ -122,6 +122,13 @@ def _run(
     along on the operation: nothing downstream can tell it apart from a
     caller-owned session by looking at the id, which is why every CLI
     navigation used to report ``ephemeral: false`` (issue #14).
+
+    ``ephemeral_session`` also runs the opportunistic store sweep (build plan
+    t10) before it ever yields, so ``session.swept`` is already known here.
+    It rides into ``execute`` as the separate ``swept=`` parameter rather than
+    onto the operation, so a caller can see what disappeared without that
+    disclosure being able to change what this operation itself reports
+    (build plan t11).
     """
     service, context = _factory.build_invocation(args)
     requested = getattr(args, "session_id", None)
@@ -142,7 +149,7 @@ def _run(
             session_ephemeral=session.ephemeral,
             session_reused=session.reused,
         )
-        result = service.execute(operation, context)
+        result = service.execute(operation, context, swept=session.swept)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
 
 

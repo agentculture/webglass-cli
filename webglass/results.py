@@ -254,6 +254,18 @@ class WebOperationResult:
     # confused with webglass.effects.EffectClass, which classifies the
     # *operation kind* itself, not an observed runtime effect.
     known_effects: tuple[str, ...] = ()
+    # Public records of sessions the invocation's opportunistic session-store
+    # sweep reaped as an unrequested side effect (issue #14 build plan
+    # t10/t11) — never the raw ``SessionRecord``, always its
+    # ``to_public_dict()`` rendering, so ``endpoint_ref`` stays out the same
+    # way it stays out of ``session clean``'s ``reaped`` payload. This lives
+    # here, off ``content``, for the same reason ``known_effects`` does: it is
+    # WebGlass's own control-plane bookkeeping about what this invocation did
+    # to the store, not operation-kind-specific payload. Always present, even
+    # empty — an absent field would be ambiguous between "nothing was swept"
+    # and "this build doesn't report sweeps", which is precisely the
+    # observability gap issue #14 was filed out of.
+    swept_sessions: tuple[dict[str, Any], ...] = ()
     evidence_refs: tuple[str, ...] = ()
     navigation_history: tuple[NavigationHop, ...] = ()
     cache: CacheFreshness | None = None
@@ -283,6 +295,7 @@ class WebOperationResult:
             "content": self.content.to_dict(),
             "policy_verdict": self.policy_verdict.to_dict(),
             "known_effects": list(self.known_effects),
+            "swept_sessions": [dict(record) for record in self.swept_sessions],
             "evidence_refs": list(self.evidence_refs),
             "navigation_history": [hop.to_dict() for hop in self.navigation_history],
             "cache": self.cache.to_dict() if self.cache is not None else None,

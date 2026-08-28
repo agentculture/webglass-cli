@@ -25,6 +25,7 @@ here:
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from webglass.adapters.session_store import (
     default_sessions_dir,
 )
 from webglass.cli import _factory, main
+from webglass.effects import OperationKind
 from webglass.service import WebGlassService
 from webglass.sessions import SessionStatus
 
@@ -383,3 +385,127 @@ def test_the_records_the_sweep_reaped_are_reachable_afterwards(tmp_path: Path) -
 
     assert [record.session_id for record in swept] == ["stale-active"]
     assert all(record.status is SessionStatus.EXPIRED for record in swept)
+
+
+# ---------------------------------------------------------------------------
+# Task t11: the sweep gets an observability surface
+# ---------------------------------------------------------------------------
+
+
+def test_a_sweep_that_reaped_something_says_so_in_the_json_envelope(
+    tmp_path: Path,
+) -> None:
+    """Acceptance criterion 1, exercised at the service layer.
+
+    ``swept`` rides into ``execute`` as a side channel (build plan t11) and
+    must land, unconditionally, on the result — not only when a handler
+    happens to look at it.
+    """
+    store = _store(tmp_path)
+    service = _service(store)
+    _seed(
+        store,
+        "stale-active",
+        status=SessionStatus.ACTIVE,
+        expires_at=FIXED_TIME - 60.0,
+        last_used_at=FIXED_TIME - 60.0,
+    )
+
+    with _factory.ephemeral_session(service, None, hosts=(HOST,)) as provisioned:
+        operation = _factory.build_operation(
+            service,
+            _factory.build_context(),
+            OperationKind.SESSION_LIST,
+            session_id=provisioned.session_id,
+        )
+        result = service.execute(operation, _factory.build_context(), swept=provisioned.swept)
+
+    payload = result.to_dict()
+    # The record the sweep reaped, rendered exactly as the store observed it
+    # *after* reaping — status EXPIRED, not the ACTIVE it was seeded with.
+    assert [entry["session_id"] for entry in payload["swept_sessions"]] == ["stale-active"]
+    assert payload["swept_sessions"][0]["status"] == "expired"
+    assert "sessions-swept" in payload["known_effects"]
+
+
+def test_a_sweep_that_reaped_nothing_still_reports_an_empty_list(tmp_path: Path) -> None:
+    """Criterion 2's flip side: absence must read as 'nothing swept', not
+    'this build does not report sweeps' (the same ambiguity ``session_ephemeral``
+    and ``session_reused`` were written to avoid).
+    """
+    store = _store(tmp_path)
+    service = _service(store)
+
+    with _factory.ephemeral_session(service, None, hosts=(HOST,)) as provisioned:
+        assert provisioned.swept == ()
+        operation = _factory.build_operation(
+            service,
+            _factory.build_context(),
+            OperationKind.SESSION_LIST,
+            session_id=provisioned.session_id,
+        )
+        result = service.execute(operation, _factory.build_context(), swept=provisioned.swept)
+
+    payload = result.to_dict()
+    assert payload["swept_sessions"] == []
+    assert "sessions-swept" not in payload["known_effects"]
+
+
+def test_the_swept_session_payload_carries_no_endpoint_ref(tmp_path: Path) -> None:
+    """Trust-zone requirement: a reaped record's secret-equivalent connect
+    endpoint must never reach the result, exactly as it never reaches
+    ``session clean``'s ``reaped`` payload.
+    """
+    store = _store(tmp_path)
+    service = _service(store)
+    _seed(
+        store,
+        "stale-active",
+        status=SessionStatus.ACTIVE,
+        expires_at=FIXED_TIME - 60.0,
+        last_used_at=FIXED_TIME - 60.0,
+    )
+
+    with _factory.ephemeral_session(service, None, hosts=(HOST,)) as provisioned:
+        operation = _factory.build_operation(
+            service,
+            _factory.build_context(),
+            OperationKind.SESSION_LIST,
+            session_id=provisioned.session_id,
+        )
+        result = service.execute(operation, _factory.build_context(), swept=provisioned.swept)
+
+    payload = result.to_dict()
+    assert len(payload["swept_sessions"]) == 1
+    assert "endpoint_ref" not in payload["swept_sessions"][0]
+
+
+def test_a_sweep_reported_through_the_real_cli_json_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End to end, criterion 1 and 2 together: a caller reading only
+    ``webglass session create --json`` (no earlier observation of the sweep)
+    can name exactly what disappeared.
+    """
+    store = FileSessionStore(default_sessions_dir())
+    now = time.time()
+    # Only case-1 records (ACTIVE past expires_at, unleased) come back from
+    # ``clean()`` as "reaped" — a purged CLOSED record does not (see
+    # ``FileSessionStore.clean``'s docstring), so this has to be the same
+    # shape the other opportunistic-sweep tests in this file use.
+    _seed(
+        store,
+        "stale-active",
+        status=SessionStatus.ACTIVE,
+        expires_at=now - 60.0,
+        last_used_at=now - 60.0,
+    )
+
+    assert main(["session", "create", "--json"]) == 0
+    stdout = capsys.readouterr().out
+    payload = json.loads(stdout)
+
+    assert payload["swept_sessions"], "the reaped record must be reachable from --json alone"
+    assert payload["swept_sessions"][0]["session_id"] == "stale-active"
+    assert "endpoint_ref" not in payload["swept_sessions"][0]
+    assert "sessions-swept" in payload["known_effects"]
