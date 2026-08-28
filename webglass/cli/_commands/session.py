@@ -113,10 +113,27 @@ def _no_verb(args: argparse.Namespace) -> int:
 
 
 def _run(
-    kind: OperationKind, args: argparse.Namespace, *, normalized_args: dict[str, Any] | None = None
+    kind: OperationKind,
+    args: argparse.Namespace,
+    *,
+    normalized_args: dict[str, Any] | None = None,
+    sweep: bool = False,
 ) -> int:
+    """Build one operation, execute it, render it. No operation logic here.
+
+    ``sweep`` is the opportunistic session-store sweep (build plan t10), and
+    only ``create`` passes it. It runs before the operation and entirely
+    outside its result: whatever it reaped — or failed to — cannot change
+    what the caller is told about the session they asked for. Every other
+    verb in this noun *reads* the store (or, for ``clean``, sweeps it because
+    that is what was asked), and a read verb that quietly rewrote the store
+    it was asked to describe would be deleting the evidence out from under
+    exactly the investigation issue #14 was.
+    """
     service = _factory.build_service()
     context = _factory.build_context()
+    if sweep:
+        _factory.sweep_session_store(service)
     operation = _factory.build_operation(service, context, kind, normalized_args=normalized_args)
     result = service.execute(operation, context)
     return _factory.render_operation_result(result, json_mode=bool(getattr(args, "json", False)))
@@ -128,7 +145,7 @@ def cmd_session_create(args: argparse.Namespace) -> int:
         normalized["ttl_seconds"] = args.ttl_seconds
     if args.session_id is not None:
         normalized["session_id"] = args.session_id
-    return _run(OperationKind.SESSION_CREATE, args, normalized_args=normalized)
+    return _run(OperationKind.SESSION_CREATE, args, normalized_args=normalized, sweep=True)
 
 
 def cmd_session_list(args: argparse.Namespace) -> int:

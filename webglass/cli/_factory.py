@@ -152,6 +152,7 @@ from webglass.sessions import DEFAULT_LEASE_TTL_SECONDS, LeaseGrant, SessionStat
 __all__ = [
     "BROWSER_BACKEND_ENV",
     "BROWSER_BACKENDS",
+    "OPPORTUNISTIC_SWEEP_BUDGET_SECONDS",
     "POLICY_PROFILE_ENV",
     "REUSE_CANDIDATE_LIMIT",
     "SESSION_OWNER_ENV",
@@ -175,6 +176,7 @@ __all__ = [
     "flow_owner_token",
     "render_operation_result",
     "reset_browser_backends",
+    "sweep_session_store",
 ]
 
 
@@ -269,6 +271,82 @@ SESSION_OWNER_ENV = "WEBGLASS_SESSION_OWNER"
 #: current work*, and reaching further back would start resembling a session
 #: cache keyed by host — which is not what this is.
 REUSE_CANDIDATE_LIMIT = 3
+
+#: Wall-clock budget for one opportunistic sweep, in seconds.
+#:
+#: **Time, not a record count** (spec v3's resolution). Per-record cost here
+#: is filesystem-bound — an ``flock``, a JSON read, and for a reapable record
+#: a ``SIGTERM`` plus an ``rmtree`` — and it varies by orders of magnitude
+#: between a tmpfs and a loaded network mount. A count generous enough to be
+#: useful on the fast one is a stall on the slow one, whereas a time bound
+#: costs the same everywhere and simply reaps fewer records where each one
+#: costs more.
+#:
+#: 30ms, against the spec's measurable target of **under 50ms** added to
+#: ``page open`` over a store of 300 records (c37). The 20ms of headroom is
+#: deliberate: :meth:`~webglass.adapters.session_store.FileSessionStore.clean`
+#: checks the deadline *between* records, so a pass can overrun by the cost
+#: of the one record it is already working on — and the record it is working
+#: on is, precisely when it matters, the expensive reaping one.
+#:
+#: Stopping early loses nothing. The sweep is opportunistic by construction:
+#: the next session-creating invocation picks up where this one stopped, and
+#: ``webglass session clean`` remains the explicit, unbounded pass for a
+#: caller who wants the whole store dealt with now.
+OPPORTUNISTIC_SWEEP_BUDGET_SECONDS = 0.030
+
+
+def sweep_session_store(
+    service: WebGlassService,
+    *,
+    budget_seconds: float = OPPORTUNISTIC_SWEEP_BUDGET_SECONDS,
+) -> tuple[FileSessionRecord, ...]:
+    """Spend a bounded slice of this invocation reaping the session store.
+
+    This is the root fix for issue #14. ``FileSessionStore.clean`` was
+    correct and complete and had exactly one caller — the explicit
+    ``webglass session clean`` verb — so a host only got a tidy store if
+    somebody remembered to ask, and nobody did: the reporting host reached
+    134 records and 206 MB of orphaned profile directories with a working
+    cleanup routine sitting unused beside them. Cleanup that depends on
+    being remembered is not cleanup.
+
+    Three properties make this safe to run behind a caller's back:
+
+    **Bounded.** :data:`OPPORTUNISTIC_SWEEP_BUDGET_SECONDS` caps the work per
+    invocation; a store far larger than one budget is cleared over several
+    invocations rather than by making one of them slow.
+
+    **Silent about failure.** Every exception is swallowed and reported as
+    "swept nothing". Housekeeping the caller did not request must never turn
+    their successful observation into a failure, and there is no failure mode
+    here worth telling them about: the store is simply still dirty, and the
+    next invocation will try again. (``session clean``, which the caller
+    *did* ask for, still surfaces its errors normally.)
+
+    **Liveness-gated, not owner-gated.** ``clean`` skips any record whose
+    lease is held and unexpired, which is the one signal the store has that a
+    browser is in use right now; it does *not* skip another owner's records,
+    because an expired, unleased record means its owner finished or crashed
+    and reaping it is exactly the point (spec claim c38). Callers must
+    therefore make sure any session they are about to use is already leased
+    before sweeping — see :func:`ephemeral_session` on the ordering.
+
+    Returns the records it reaped so a caller can say what disappeared. This
+    is an unrequested *destructive* local-state effect — it terminates
+    processes and removes profile directories — and an irreversible effect
+    nobody can name afterwards is the observability gap issue #14 was itself
+    filed out of (spec s16).
+    """
+    store = getattr(service, "sessions", None)
+    if not isinstance(store, FileSessionStore):
+        # A fake or in-memory store in a test or an embedding: nothing on
+        # disk to sweep, and no `clean` contract to rely on.
+        return ()
+    try:
+        return tuple(store.clean(service.clock.now(), time_budget_seconds=budget_seconds))
+    except Exception:  # noqa: BLE001 - deliberately total; see the docstring
+        return ()
 
 
 def flow_owner_token(environ: Mapping[str, str] | None = None) -> str:
@@ -660,11 +738,18 @@ class ProvisionedSession:
     an endpoint through the store), so downstream code cannot recover
     ``ephemeral`` by looking at the id — which is precisely how every CLI
     navigation came to report ``ephemeral: false`` in issue #14.
+
+    ``swept`` carries out what the invocation's opportunistic sweep reaped
+    (:func:`sweep_session_store`, build plan t10). It rides along here for
+    the same reason ``ephemeral`` does: the provisioner is the only place
+    that knows, and a destructive effect nobody downstream can name is one
+    nobody can report.
     """
 
     session_id: str | None
     ephemeral: bool = False
     reused: bool = False
+    swept: tuple[FileSessionRecord, ...] = ()
 
 
 def target_hosts(url: str | None) -> tuple[str, ...]:
@@ -806,6 +891,21 @@ def ephemeral_session(
     ``--fresh-session``): a brand-new anonymous session, whatever the
     environment says. Reuse never happens without a flow token, so an
     ordinary invocation is unaffected either way.
+
+    The opportunistic sweep (build plan t10)
+    ----------------------------------------
+    Every branch that actually provisions a session — reused or freshly
+    created — also spends a bounded slice of the invocation sweeping the
+    store (:func:`sweep_session_store`), and hands back what it reaped on
+    :attr:`ProvisionedSession.swept`. The pass-through branches deliberately
+    do not: a read verb must never mutate the store its caller is trying to
+    observe.
+
+    **Ordering is load-bearing.** The sweep runs *after* the session this
+    invocation will use exists and is leased, never before. ``clean`` gates
+    on liveness, not ownership, so a session that is merely intended-to-be-
+    used looks exactly like an abandoned one — sweeping first could reap the
+    very session the next line is about to navigate.
     """
     if requested is not None or not provision:
         yield ProvisionedSession(requested)
@@ -829,7 +929,9 @@ def ephemeral_session(
             # this step's page (spec honesty h27).
             store.bump_generation(matched.session_id)
             # Not ours to close — the flow owns it, and the next step needs it.
-            yield ProvisionedSession(matched.session_id, reused=True)
+            yield ProvisionedSession(
+                matched.session_id, reused=True, swept=sweep_session_store(service)
+            )
             return
 
     if store.launcher is None:
@@ -860,14 +962,19 @@ def ephemeral_session(
         raise CliError(
             code=EXIT_ENV_ERROR, message=exc.message, remediation=exc.remediation
         ) from exc
+    # Only now, with this invocation's own session created (and, above,
+    # reused under a held lease), is it safe to sweep: `clean` gates on
+    # liveness rather than ownership, so anything the sweep could reach must
+    # already look alive to it before it runs.
+    swept = sweep_session_store(service)
     if flow_token:
         # The first step of a flow: retained, so the next step has something
         # to continue. Its lifetime belongs to the flow, not to this
         # invocation, so it is neither labelled ephemeral nor closed here.
-        yield ProvisionedSession(session_id)
+        yield ProvisionedSession(session_id, swept=swept)
         return
     try:
-        yield ProvisionedSession(session_id, ephemeral=True)
+        yield ProvisionedSession(session_id, ephemeral=True, swept=swept)
     finally:
         # Best-effort by design: a browser that already died must not turn a
         # completed observation into a failure.
